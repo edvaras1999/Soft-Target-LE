@@ -4,7 +4,7 @@
 // frente do jogador e vira o personagem para ele durante o golpe. Nao usa Papyrus: so reage ao
 // botao, e uma pequena thread (so ativa durante o golpe) faz a rotacao suave.
 //
-// ESTADO: versao 0.1, nunca testada no jogo. As partes menos certas estao marcadas com "VERIFICAR".
+// ESTADO: versao 0.1, nunca testada no jogo.
 // Licenca GPL-3.0. A base de compilacao e os enderecos vem do FreeClimb LE (GPL-3.0).
 
 #include "skse/PluginAPI.h"
@@ -17,7 +17,7 @@
 #include <math.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.1.0 (primeira versao completa, por testar)"
+#define PLUGIN_VERSION_STR	"0.1.1 (lista de atores e hostilidade corrigidas)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_FILE		"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
 
@@ -37,6 +37,7 @@ namespace
 		int		holdMs;			// quanto tempo o plugin segura a rotacao por golpe
 		int		enabled;
 		int		logOnly;		// 1 = so escreve no log, nao vira o personagem
+		int		requireCombat;	// 1 = so considera inimigos que ja estao em combate
 	};
 	Config g_cfg;
 
@@ -56,8 +57,9 @@ namespace
 		g_cfg.holdMs		= (int)ReadFloat("HoldMilliseconds", 400.0f);
 		g_cfg.enabled		= (int)ReadFloat("Enabled", 1.0f);
 		g_cfg.logOnly		= (int)ReadFloat("LogOnly", 0.0f);
-		_MESSAGE("config: range=%.0f cone=%.0f turn=%.0f deg/s hold=%d ms enabled=%d logOnly=%d",
-				 g_cfg.range, g_cfg.coneDeg, g_cfg.turnSpeedDeg, g_cfg.holdMs, g_cfg.enabled, g_cfg.logOnly);
+		g_cfg.requireCombat	= (int)ReadFloat("RequireCombat", 1.0f);
+		_MESSAGE("config: range=%.0f cone=%.0f turn=%.0f deg/s hold=%d ms enabled=%d logOnly=%d combat=%d",
+				 g_cfg.range, g_cfg.coneDeg, g_cfg.turnSpeedDeg, g_cfg.holdMs, g_cfg.enabled, g_cfg.logOnly, g_cfg.requireCombat);
 	}
 
 	// ------------------------------------------------------------------ matematica de angulos
@@ -84,13 +86,18 @@ namespace
 		float bestScore = 1e30f;
 		bool found = false;
 
-		// VERIFICAR: a lista de referencias da celula. Nas fontes do SKSE 1.7.3 e esperado
-		// cell->refData.maxSlots e cell->refData.refArray[i].ref. Se a compilacao reclamar
-		// destes nomes, e aqui que se corrige.
-		const UInt32 count = cell->refData.maxSlots;
+		// A lista de referencias da celula e cell->objectList (GameForms.h do SKSE 1.7.3, offset 0x4C):
+		// ponteiro para os dados + dois contadores (capacidade e tamanho). Le-se em bruto e usa-se o
+		// MENOR dos dois contadores, que e sempre o tamanho, qualquer que seja a ordem deles.
+		const UInt32 * raw = (const UInt32 *)&cell->objectList;
+		TESObjectREFR ** items = (TESObjectREFR **)raw[0];
+		UInt32 count = (raw[1] < raw[2]) ? raw[1] : raw[2];
+		if(!items || count == 0) return false;
+		if(count > 20000) count = 20000;										// seguranca
+
 		for(UInt32 i = 0; i < count; ++i)
 		{
-			TESObjectREFR * ref = cell->refData.refArray[i].ref;
+			TESObjectREFR * ref = items[i];
 			if(!ref || ref == (TESObjectREFR *)player) continue;
 			if(ref->formType != kFormType_Character) continue;
 
@@ -98,8 +105,10 @@ namespace
 			if(!actor) continue;
 			if(Engine::LifeState(actor) != 0) continue;			// so vivos
 
-			// VERIFICAR: ainda nao ha teste de "hostil". Esta versao considera qualquer
-			// ator vivo. Para o teste, use LogOnly=1 e veja quem entra na lista.
+			// So inimigos: hostil ao jogador (funcao do proprio jogo, endereco da LE ja no SKSE).
+			if(!CALL_MEMBER_FN(actor, IsHostileToActor)(player)) continue;
+			if(g_cfg.requireCombat && !actor->IsInCombat()) continue;
+
 			const NiPoint3 pos = Engine::Position(actor);
 			const float dx = pos.x - me.x;
 			const float dy = pos.y - me.y;
@@ -192,7 +201,6 @@ namespace
 				const bool pressedNow = (value != 0.0f) && (button->timer == 0.0f);
 				if(!pressedNow) continue;
 
-				// VERIFICAR: nomes dos campos de InputStringHolder para os botoes de ataque.
 				if(*control == strings->rightAttack || *control == strings->leftAttack)
 					OnAttackPressed();
 			}
