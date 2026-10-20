@@ -17,12 +17,16 @@
 #include <math.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.1.1 (lista de atores e hostilidade corrigidas)"
+#define PLUGIN_VERSION_STR	"0.1.2 (corrigida a linkagem)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_FILE		"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
 
 static PluginHandle				g_pluginHandle	= kPluginHandle_Invalid;
 static SKSEMessagingInterface *	g_messaging		= NULL;
+
+// O SKSE declara LookupREFRByHandle mas so a define em GameReferences.cpp, que nao compilamos.
+// Definimos aqui com o endereco da LE 1.9.32.0 (confirmado no FreeClimb LE).
+const _LookupREFRByHandle LookupREFRByHandle = (_LookupREFRByHandle)0x004A9180;
 
 namespace
 {
