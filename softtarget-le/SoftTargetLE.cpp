@@ -1,10 +1,11 @@
 // SoftTarget LE - golpes auto-direcionados (sem travar a mira), estilo Witcher 3.
 //
-// Ao carregar no botao de ataque, o plugin procura o inimigo mais proximo dentro de um cone a
-// frente do jogador e vira o personagem para ele durante o golpe. Nao usa Papyrus: so reage ao
-// botao, e uma pequena thread (so ativa durante o golpe) faz a rotacao suave.
+// Ao carregar no botao de ataque (ou ao SEGURAR o botao de bloqueio), o plugin procura o inimigo
+// mais proximo (cone a frente ou circulo a volta) e vira o CORPO do personagem para ele, de forma
+// suave. Nao usa Papyrus. Todas as afinacoes estao no SoftTargetLE.ini, que e relido sozinho
+// quando e guardado (nao precisa de reiniciar o jogo).
 //
-// ESTADO: versao 0.1, nunca testada no jogo.
+// ESTADO: versao 0.2.0, ainda por testar. Nao mexe na camera (ver README).
 // Licenca GPL-3.0. A base de compilacao e os enderecos vem do FreeClimb LE (GPL-3.0).
 
 #include "skse/PluginAPI.h"
@@ -15,11 +16,13 @@
 
 #include <shlobj.h>
 #include <math.h>
+#include <string.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.1.2 (corrigida a linkagem)"
+#define PLUGIN_VERSION_STR	"0.2.0 (ini fiel, circulo, bloqueio continuo, suavizacao)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
-#define PLUGIN_INI_FILE		"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
+#define PLUGIN_INI_NAME		"SoftTargetLE.ini"
+#define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
 
 static PluginHandle				g_pluginHandle	= kPluginHandle_Invalid;
 static SKSEMessagingInterface *	g_messaging		= NULL;
@@ -35,35 +38,126 @@ namespace
 	// ------------------------------------------------------------------ afinacoes (.ini)
 	struct Config
 	{
-		float	range;			// alcance maximo, em unidades do jogo (140 = ~2 m)
-		float	coneDeg;		// angulo TOTAL do cone a frente do jogador, em graus
-		float	turnSpeedDeg;	// velocidade de rotacao, graus por segundo
-		int		holdMs;			// quanto tempo o plugin segura a rotacao por golpe
-		int		enabled;
+		int		enabled;		// 1 = ligado
 		int		logOnly;		// 1 = so escreve no log, nao vira o personagem
-		int		requireCombat;	// 1 = so considera inimigos que ja estao em combate
+		int		verbose;		// 1 = log detalhado
+		int		requireCombat;	// 1 = so inimigos ja em combate
+		int		shape;			// 0 = cone a frente, 1 = circulo a volta (360 graus)
+		float	range;			// alcance maximo (140 = ~2 m)
+		float	coneDeg;		// angulo TOTAL do cone (so no modo cone)
+		float	turnSpeedDeg;	// velocidade maxima de rotacao, graus por segundo
+		float	smoothing;		// 0 = velocidade constante; >0 = abranda ao chegar (maior = mais rapido)
+		int		updateMs;		// intervalo da rotacao, em ms (menor = mais fluido)
+		int		tapAssist;		// 1 = vira ao carregar no ataque
+		int		holdMode;		// bloqueio continuo: 0 = off, 1 = botao esquerdo (M2), 2 = botao direito, 3 = ambos
+		int		retargetMs;		// de quanto em quanto tempo re-escolhe o alvo no modo continuo
+		int		holdMs;			// quanto tempo a rotacao e mantida depois de um toque no ataque
 	};
 	Config g_cfg;
 
+	char		g_iniPath[MAX_PATH];
+	FILETIME	g_iniStamp;
+	DWORD		g_lastIniCheck = 0;
+
+	bool FileExists(const char * path)
+	{
+		const DWORD a = GetFileAttributesA(path);
+		return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+	}
+
+	// Procura o .ini ao lado da DLL (funciona com Mod Organizer 2 e Vortex); se nao houver, usa
+	// o caminho classico Data\SKSE\Plugins.
+	void ResolveIniPath()
+	{
+		g_iniPath[0] = 0;
+
+		HMODULE self = NULL;
+		if(GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+							  (LPCSTR)&ResolveIniPath, &self))
+		{
+			char dll[MAX_PATH] = { 0 };
+			const DWORD n = GetModuleFileNameA(self, dll, MAX_PATH);
+			if(n > 0 && n < MAX_PATH)
+			{
+				char * slash = strrchr(dll, '\\');
+				if(slash)
+				{
+					slash[1] = 0;
+					_snprintf_s(g_iniPath, sizeof(g_iniPath), _TRUNCATE, "%s%s", dll, PLUGIN_INI_NAME);
+				}
+			}
+		}
+
+		if(!g_iniPath[0] || !FileExists(g_iniPath))
+		{
+			if(FileExists(PLUGIN_INI_FALLBACK))
+				_snprintf_s(g_iniPath, sizeof(g_iniPath), _TRUNCATE, "%s", PLUGIN_INI_FALLBACK);
+		}
+	}
+
 	float ReadFloat(const char * key, float def)
 	{
-		char def_s[32], buf[32];
+		char def_s[32], buf[48];
 		_snprintf_s(def_s, sizeof(def_s), _TRUNCATE, "%f", def);
-		GetPrivateProfileStringA("SoftTarget", key, def_s, buf, sizeof(buf), PLUGIN_INI_FILE);
+		GetPrivateProfileStringA("SoftTarget", key, def_s, buf, sizeof(buf), g_iniPath);
 		return (float)atof(buf);
+	}
+
+	int ReadInt(const char * key, int def)
+	{
+		return (int)(ReadFloat(key, (float)def) + (def < 0 ? -0.5f : 0.5f));
 	}
 
 	void LoadConfig()
 	{
+		const bool found = g_iniPath[0] && FileExists(g_iniPath);
+		if(found)
+		{
+			WIN32_FILE_ATTRIBUTE_DATA d;
+			if(GetFileAttributesExA(g_iniPath, GetFileExInfoStandard, &d)) g_iniStamp = d.ftLastWriteTime;
+		}
+
+		g_cfg.enabled		= ReadInt("Enabled", 1);
+		g_cfg.logOnly		= ReadInt("LogOnly", 0);
+		g_cfg.verbose		= ReadInt("Verbose", 0);
+		g_cfg.requireCombat	= ReadInt("RequireCombat", 1);
+		g_cfg.shape			= ReadInt("Shape", 0);
 		g_cfg.range			= ReadFloat("Range", 450.0f);
 		g_cfg.coneDeg		= ReadFloat("ConeDegrees", 140.0f);
 		g_cfg.turnSpeedDeg	= ReadFloat("TurnSpeedDegPerSec", 900.0f);
-		g_cfg.holdMs		= (int)ReadFloat("HoldMilliseconds", 400.0f);
-		g_cfg.enabled		= (int)ReadFloat("Enabled", 1.0f);
-		g_cfg.logOnly		= (int)ReadFloat("LogOnly", 0.0f);
-		g_cfg.requireCombat	= (int)ReadFloat("RequireCombat", 1.0f);
-		_MESSAGE("config: range=%.0f cone=%.0f turn=%.0f deg/s hold=%d ms enabled=%d logOnly=%d combat=%d",
-				 g_cfg.range, g_cfg.coneDeg, g_cfg.turnSpeedDeg, g_cfg.holdMs, g_cfg.enabled, g_cfg.logOnly, g_cfg.requireCombat);
+		g_cfg.smoothing		= ReadFloat("Smoothing", 0.0f);
+		g_cfg.updateMs		= ReadInt("UpdateMilliseconds", 8);
+		g_cfg.tapAssist		= ReadInt("TapAssist", 1);
+		g_cfg.holdMode		= ReadInt("HoldFaceButton", 0);
+		g_cfg.retargetMs	= ReadInt("HoldRetargetMilliseconds", 100);
+		g_cfg.holdMs		= ReadInt("HoldMilliseconds", 400);
+
+		if(g_cfg.updateMs < 1)		g_cfg.updateMs = 1;
+		if(g_cfg.updateMs > 50)		g_cfg.updateMs = 50;
+		if(g_cfg.retargetMs < 16)	g_cfg.retargetMs = 16;
+
+		_MESSAGE("config (%s%s): enabled=%d logOnly=%d shape=%s range=%.0f cone=%.0f turn=%.0f smooth=%.1f update=%dms tap=%d hold=%d retarget=%dms combat=%d",
+				 found ? "ini: " : "NO ini found, defaults; looked for: ", g_iniPath[0] ? g_iniPath : PLUGIN_INI_NAME,
+				 g_cfg.enabled, g_cfg.logOnly, g_cfg.shape ? "circle" : "cone", g_cfg.range, g_cfg.coneDeg,
+				 g_cfg.turnSpeedDeg, g_cfg.smoothing, g_cfg.updateMs, g_cfg.tapAssist, g_cfg.holdMode,
+				 g_cfg.retargetMs, g_cfg.requireCombat);
+	}
+
+	// Relê o .ini se ele mudou (verifica no maximo uma vez por segundo).
+	void MaybeReloadConfig()
+	{
+		const DWORD now = GetTickCount();
+		if(now - g_lastIniCheck < 1000) return;
+		g_lastIniCheck = now;
+
+		if(!g_iniPath[0]) return;
+		WIN32_FILE_ATTRIBUTE_DATA d;
+		if(!GetFileAttributesExA(g_iniPath, GetFileExInfoStandard, &d)) return;
+		if(CompareFileTime(&d.ftLastWriteTime, &g_iniStamp) != 0)
+		{
+			_MESSAGE("ini changed - reloading");
+			LoadConfig();
+		}
 	}
 
 	// ------------------------------------------------------------------ matematica de angulos
@@ -77,8 +171,8 @@ namespace
 	}
 
 	// ------------------------------------------------------------------ escolha do alvo
-	// Devolve true se encontrou um alvo e escreve a guinada desejada em *outYaw.
-	bool FindTarget(Actor * player, float * outYaw)
+	// Devolve true se encontrou um alvo; escreve a guinada desejada e o formID.
+	bool FindTarget(Actor * player, float * outYaw, UInt32 * outId)
 	{
 		TESObjectCELL * cell = Engine::ParentCell(player);
 		if(!cell) return false;
@@ -86,6 +180,7 @@ namespace
 		const NiPoint3 me		= Engine::Position(player);
 		const float facing		= Engine::Rotation(player).z;
 		const float halfCone	= (g_cfg.coneDeg * 0.5f) * kPi / 180.0f;
+		const bool  cone		= (g_cfg.shape == 0);
 
 		float bestScore = 1e30f;
 		bool found = false;
@@ -109,7 +204,7 @@ namespace
 			if(!actor) continue;
 			if(Engine::LifeState(actor) != 0) continue;			// so vivos
 
-			// So inimigos: hostil ao jogador (funcao do proprio jogo, endereco da LE ja no SKSE).
+			// So inimigos: hostil ao jogador (funcao do proprio jogo).
 			if(!CALL_MEMBER_FN(actor, IsHostileToActor)(player)) continue;
 			if(g_cfg.requireCombat && !actor->IsInCombat()) continue;
 
@@ -122,16 +217,25 @@ namespace
 
 			const float yaw = atan2f(dx, dy);
 			const float off = fabsf(WrapPi(yaw - facing));
-			if(off > halfCone) continue;
 
-			// Mais perto e mais a frente = melhor. O desvio angular pesa como distancia extra.
-			const float score = dist * (1.0f + off / (kPi * 0.5f));
+			float score;
+			if(cone)
+			{
+				if(off > halfCone) continue;
+				// Mais perto e mais a frente = melhor. O desvio angular pesa como distancia extra.
+				score = dist * (1.0f + off / (kPi * 0.5f));
+			}
+			else
+			{
+				score = dist;											// circulo: o mais proximo, em qualquer direcao
+			}
+
 			if(score < bestScore)
 			{
 				bestScore = score;
 				*outYaw = yaw;
+				*outId = actor->formID;
 				found = true;
-				_MESSAGE("target candidate: formID %08X dist %.0f off %.0f deg", actor->formID, dist, off * 180.0f / kPi);
 			}
 		}
 		return found;
@@ -147,10 +251,11 @@ namespace
 		DWORD last = GetTickCount();
 		for(;;)
 		{
-			Sleep(8);
+			Sleep((DWORD)g_cfg.updateMs);
 			const DWORD now = GetTickCount();
-			const float dt = (now - last) / 1000.0f;
+			float dt = (now - last) / 1000.0f;
 			last = now;
+			if(dt > 0.1f) dt = 0.1f;
 
 			if(!g_active) continue;
 			if((LONG)(now - g_endTick) >= 0) { g_active = 0; continue; }
@@ -161,28 +266,58 @@ namespace
 			NiPoint3 & rot = Engine::Rotation(player);
 			const float delta = WrapPi(g_targetYaw - rot.z);
 			const float maxStep = g_cfg.turnSpeedDeg * kPi / 180.0f * dt;
-			const float step = (fabsf(delta) <= maxStep) ? delta : (delta > 0 ? maxStep : -maxStep);
+
+			// Suavizacao: com Smoothing > 0 o passo e proporcional a distancia que falta
+			// (movimento que abranda ao chegar), sempre limitado pela velocidade maxima.
+			float want = delta;
+			if(g_cfg.smoothing > 0.0f) want = delta * (1.0f - expf(-g_cfg.smoothing * dt));
+
+			float step = want;
+			if(step >  maxStep) step =  maxStep;
+			if(step < -maxStep) step = -maxStep;
 			rot.z = WrapPi(rot.z + step);
 		}
 	}
 
-	// ------------------------------------------------------------------ botao de ataque
-	void OnAttackPressed()
-	{
-		if(!g_cfg.enabled) return;
+	// ------------------------------------------------------------------ escolha + arranque
+	UInt32 g_lastTargetId = 0;
 
+	// Escolhe o alvo e manda a thread vira-lo durante 'windowMs'.
+	bool AcquireAndTurn(int windowMs)
+	{
 		PlayerCharacter * player = Engine::Player();
-		if(!player) return;
+		if(!player) return false;
 
 		float yaw = 0.0f;
-		if(!FindTarget(player, &yaw)) return;
+		UInt32 id = 0;
+		if(!FindTarget(player, &yaw, &id)) return false;
 
-		_MESSAGE("attack: turning toward yaw %.0f deg%s", yaw * 180.0f / kPi, g_cfg.logOnly ? " (LogOnly)" : "");
-		if(g_cfg.logOnly) return;
+		if(g_cfg.verbose || id != g_lastTargetId)
+			_MESSAGE("target: formID %08X, turning toward yaw %.0f deg%s", id, yaw * 180.0f / kPi, g_cfg.logOnly ? " (LogOnly)" : "");
+		g_lastTargetId = id;
+
+		if(g_cfg.logOnly) return true;
 
 		g_targetYaw	= yaw;
-		g_endTick	= GetTickCount() + (DWORD)g_cfg.holdMs;
+		g_endTick	= GetTickCount() + (DWORD)windowMs;
 		g_active	= 1;
+		return true;
+	}
+
+	// ------------------------------------------------------------------ botoes
+	bool	g_holdLeft = false, g_holdRight = false;
+	DWORD	g_lastHoldEvent = 0;
+	DWORD	g_lastScan = 0;
+
+	void HoldTick()
+	{
+		const DWORD now = GetTickCount();
+		if(now - g_lastHoldEvent > 250) return;					// botao deixou de chegar: considera solto
+		if(now - g_lastScan < (DWORD)g_cfg.retargetMs) return;
+		g_lastScan = now;
+
+		const int window = (2 * g_cfg.retargetMs > 120) ? 2 * g_cfg.retargetMs : 120;
+		AcquireAndTurn(window);
 	}
 
 	class InputSink : public BSTEventSink<InputEvent>
@@ -192,7 +327,11 @@ namespace
 		{
 			InputStringHolder * strings = Engine::UserEvents();
 			if(!events || !*events || !strings) return kEvent_Continue;
+			if(!g_cfg.enabled) return kEvent_Continue;
 
+			MaybeReloadConfig();
+
+			bool holdBtnSeen = false;
 			for(InputEvent * e = *events; e; e = e->next)
 			{
 				if(e->eventType != InputEvent::kEventType_Button) continue;
@@ -201,13 +340,30 @@ namespace
 				const BSFixedString * control = button->GetControlID();
 				if(!control) continue;
 
-				const float value = *(float *)&button->flags;
-				const bool pressedNow = (value != 0.0f) && (button->timer == 0.0f);
-				if(!pressedNow) continue;
+				const bool isRight = (*control == strings->rightAttack);
+				const bool isLeft  = (*control == strings->leftAttack);
+				if(!isRight && !isLeft) continue;
 
-				if(*control == strings->rightAttack || *control == strings->leftAttack)
-					OnAttackPressed();
+				const float value = *(float *)&button->flags;
+				const bool held = (value != 0.0f);
+				const bool pressedNow = held && (button->timer == 0.0f);
+
+				if(isRight) g_holdRight = held; else g_holdLeft = held;
+
+				if(held && (((g_cfg.holdMode & 2) && isRight) || ((g_cfg.holdMode & 1) && isLeft)))
+				{
+					g_lastHoldEvent = GetTickCount();
+					holdBtnSeen = true;
+				}
+
+				if(pressedNow && g_cfg.tapAssist)
+					AcquireAndTurn(g_cfg.holdMs);
 			}
+
+			// Bloqueio continuo: enquanto o botao esta seguro, re-escolhe o alvo de tempos a tempos.
+			const bool holding = ((g_cfg.holdMode & 1) && g_holdLeft) || ((g_cfg.holdMode & 2) && g_holdRight);
+			if(holding && (holdBtnSeen || GetTickCount() - g_lastHoldEvent <= 250)) HoldTick();
+
 			return kEvent_Continue;
 		}
 	};
@@ -220,6 +376,7 @@ namespace
 		switch(message->type)
 		{
 			case SKSEMessagingInterface::kMessage_DataLoaded:
+				ResolveIniPath();
 				LoadConfig();
 				break;
 
