@@ -5,8 +5,8 @@
 // suave. Nao usa Papyrus. Todas as afinacoes estao no SoftTargetLE.ini, que e relido sozinho
 // quando e guardado (nao precisa de reiniciar o jogo).
 //
-// ESTADO: versao 0.3.0 (experimental). Novidades: inimigos reanimados, compensacao da camera
-// (CameraMode), pausa com a tecla do lock-on (LockOnKey) e mais diagnostico (Probe=1).
+// ESTADO: versao 0.4.0 (experimental). Novidades: o corpo volta ao rumo original depois do golpe,
+// o alvo e reavaliado durante todo o giro, mira vertical (magia) e mais diagnostico (Probe=1).
 // Licenca GPL-3.0. A base de compilacao e os enderecos vem do FreeClimb LE (GPL-3.0).
 
 #include "skse/PluginAPI.h"
@@ -21,7 +21,7 @@
 #include <string.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.3.0 (reanimados, camera, lock-on, diagnostico)"
+#define PLUGIN_VERSION_STR	"0.4.0 (retorno ao rumo, retarget continuo, mira vertical)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -44,20 +44,30 @@ namespace
 		int		logOnly;		// 1 = so escreve no log, nao vira o personagem
 		int		verbose;		// 1 = log detalhado
 		int		probe;			// 1 = diagnostico: escreve dados da camera/jogador/teclas no log (so leitura)
-		int		useHostileList;	// 1 = tambem aceita quem o jogo ja lista como hostil ao jogador (ajuda com reanimados)
-		int		cameraMode;		// 0 = nao mexe; 1 = contra-rotacao da camera; 2 = camera fica parada durante o giro
-		int		lockOnKey;		// codigo da tecla do lock-on (F = 33); 0 = desligado
 		int		requireCombat;	// 1 = so inimigos ja em combate
+		int		useHostileList;	// 1 = tambem aceita quem o jogo ja lista como hostil ao jogador
 		int		shape;			// 0 = cone a frente, 1 = circulo a volta (360 graus)
 		float	range;			// alcance maximo (140 = ~2 m)
 		float	coneDeg;		// angulo TOTAL do cone (so no modo cone)
+		float	maxHeightDiff;	// diferenca maxima de altura ate ao alvo (relevo)
+		float	switchMargin;	// % que um novo alvo tem de ser mais proximo para trocar (0 = troca logo)
 		float	turnSpeedDeg;	// velocidade maxima de rotacao, graus por segundo
 		float	smoothing;		// 0 = velocidade constante; >0 = abranda ao chegar (maior = mais rapido)
 		int		updateMs;		// intervalo da rotacao, em ms (menor = mais fluido)
 		int		tapAssist;		// 1 = vira ao carregar no ataque
 		int		holdMode;		// bloqueio continuo: 0 = off, 1 = botao esquerdo (M2), 2 = botao direito, 3 = ambos
-		int		retargetMs;		// de quanto em quanto tempo re-escolhe o alvo no modo continuo
+		int		retargetMs;		// de quanto em quanto tempo re-escolhe o alvo durante o giro
 		int		holdMs;			// quanto tempo a rotacao e mantida depois de um toque no ataque
+		int		returnToHeading;// 1 = depois do golpe o corpo volta ao rumo que tinha antes
+		float	returnSpeedDeg;	// velocidade do regresso, graus por segundo
+		int		returnMaxMs;	// tempo maximo do regresso
+		int		cameraMode;		// 0 = nao mexe; 1 = contra-rotacao da camera; 2 = camera fica parada durante o giro
+		int		lockOnKey;		// codigo da tecla do lock-on (F = 33); 0 = desligado
+		int		verticalMode;	// mira vertical: 0 = off, 1 = inclinacao do corpo, 2 = inclinacao da camera, 3 = ambas
+		float	aimHeight;		// altura do ponto de mira no alvo, acima dos pes
+		float	playerAimHeight;// altura de onde o jogador "mira", acima dos pes
+		int		verticalInvert;	// 1 = inverte o sentido da inclinacao (se subir em vez de descer)
+		float	verticalLimitDeg;// inclinacao maxima, em graus
 	};
 	Config g_cfg;
 
@@ -127,30 +137,41 @@ namespace
 		g_cfg.logOnly		= ReadInt("LogOnly", 0);
 		g_cfg.verbose		= ReadInt("Verbose", 0);
 		g_cfg.probe			= ReadInt("Probe", 0);
-		g_cfg.useHostileList = ReadInt("UseHostileList", 1);
-		g_cfg.cameraMode	= ReadInt("CameraMode", 0);
-		g_cfg.lockOnKey		= ReadInt("LockOnKey", 0);
 		g_cfg.requireCombat	= ReadInt("RequireCombat", 1);
+		g_cfg.useHostileList = ReadInt("UseHostileList", 1);
 		g_cfg.shape			= ReadInt("Shape", 0);
 		g_cfg.range			= ReadFloat("Range", 450.0f);
 		g_cfg.coneDeg		= ReadFloat("ConeDegrees", 140.0f);
+		g_cfg.maxHeightDiff	= ReadFloat("MaxHeightDifference", 600.0f);
+		g_cfg.switchMargin	= ReadFloat("SwitchMarginPercent", 0.0f);
 		g_cfg.turnSpeedDeg	= ReadFloat("TurnSpeedDegPerSec", 900.0f);
 		g_cfg.smoothing		= ReadFloat("Smoothing", 0.0f);
 		g_cfg.updateMs		= ReadInt("UpdateMilliseconds", 8);
 		g_cfg.tapAssist		= ReadInt("TapAssist", 1);
 		g_cfg.holdMode		= ReadInt("HoldFaceButton", 0);
-		g_cfg.retargetMs	= ReadInt("HoldRetargetMilliseconds", 100);
+		g_cfg.retargetMs	= ReadInt("RetargetMilliseconds", ReadInt("HoldRetargetMilliseconds", 80));
 		g_cfg.holdMs		= ReadInt("HoldMilliseconds", 400);
+		g_cfg.returnToHeading = ReadInt("ReturnToHeading", 1);
+		g_cfg.returnSpeedDeg = ReadFloat("ReturnSpeedDegPerSec", 360.0f);
+		g_cfg.returnMaxMs	= ReadInt("ReturnMaxMilliseconds", 1200);
+		g_cfg.cameraMode	= ReadInt("CameraMode", 0);
+		g_cfg.lockOnKey		= ReadInt("LockOnKey", 0);
+		g_cfg.verticalMode	= ReadInt("VerticalMode", 0);
+		g_cfg.aimHeight		= ReadFloat("AimHeight", 100.0f);
+		g_cfg.playerAimHeight = ReadFloat("PlayerAimHeight", 110.0f);
+		g_cfg.verticalInvert = ReadInt("VerticalInvert", 0);
+		g_cfg.verticalLimitDeg = ReadFloat("VerticalLimitDegrees", 45.0f);
 
 		if(g_cfg.updateMs < 1)		g_cfg.updateMs = 1;
 		if(g_cfg.updateMs > 50)		g_cfg.updateMs = 50;
 		if(g_cfg.retargetMs < 16)	g_cfg.retargetMs = 16;
 
-		_MESSAGE("config (%s%s): enabled=%d logOnly=%d shape=%s range=%.0f cone=%.0f turn=%.0f smooth=%.1f update=%dms tap=%d hold=%d retarget=%dms combat=%d camera=%d lockKey=%d hostileList=%d",
+		_MESSAGE("config (%s%s): enabled=%d logOnly=%d shape=%s range=%.0f cone=%.0f turn=%.0f smooth=%.1f update=%dms tap=%d hold=%d retarget=%dms combat=%d camera=%d lockKey=%d hostileList=%d return=%d vertical=%d switchMargin=%.0f",
 				 found ? "ini: " : "NO ini found, defaults; looked for: ", g_iniPath[0] ? g_iniPath : PLUGIN_INI_NAME,
 				 g_cfg.enabled, g_cfg.logOnly, g_cfg.shape ? "circle" : "cone", g_cfg.range, g_cfg.coneDeg,
 				 g_cfg.turnSpeedDeg, g_cfg.smoothing, g_cfg.updateMs, g_cfg.tapAssist, g_cfg.holdMode,
-				 g_cfg.retargetMs, g_cfg.requireCombat, g_cfg.cameraMode, g_cfg.lockOnKey, g_cfg.useHostileList);
+				 g_cfg.retargetMs, g_cfg.requireCombat, g_cfg.cameraMode, g_cfg.lockOnKey, g_cfg.useHostileList,
+				 g_cfg.returnToHeading, g_cfg.verticalMode, g_cfg.switchMargin);
 	}
 
 	// Relê o .ini se ele mudou (verifica no maximo uma vez por segundo).
@@ -181,6 +202,8 @@ namespace
 	}
 
 	// ------------------------------------------------------------------ escolha do alvo
+	UInt32 g_lastTargetId = 0;
+
 	// Inimigos que o proprio jogo ja tem em combate com o jogador (PlayerCharacter::hostileHandles,
 	// offset 0x630: ponteiro + capacidade + tamanho). Ajuda com reanimados e invocados, para os
 	// quais a pergunta "e hostil?" as vezes responde que nao.
@@ -209,8 +232,9 @@ namespace
 
 	DWORD g_lastActorLog = 0;
 
-	// Devolve true se encontrou um alvo; escreve a guinada desejada e o formID.
-	bool FindTarget(Actor * player, float * outYaw, UInt32 * outId)
+	// Devolve true se encontrou um alvo; escreve a guinada, a inclinacao (positiva = para cima)
+	// e o formID.
+	bool FindTarget(Actor * player, float * outYaw, float * outPitchUp, UInt32 * outId)
 	{
 		TESObjectCELL * cell = Engine::ParentCell(player);
 		if(!cell) return false;
@@ -219,6 +243,7 @@ namespace
 		const float facing		= Engine::Rotation(player).z;
 		const float halfCone	= (g_cfg.coneDeg * 0.5f) * kPi / 180.0f;
 		const bool  cone		= (g_cfg.shape == 0);
+		const float limitRad	= g_cfg.verticalLimitDeg * kPi / 180.0f;
 
 		UInt32 hostileIds[64];
 		const int hostileCount = g_cfg.useHostileList ? CollectHostileIds((PlayerCharacter *)player, hostileIds, 64) : 0;
@@ -253,7 +278,7 @@ namespace
 			const float dy = pos.y - me.y;
 			const float dz = pos.z - me.z;
 			const float dist = sqrtf(dx * dx + dy * dy);
-			if(dist > g_cfg.range || fabsf(dz) > 250.0f) continue;
+			if(dist > g_cfg.range || fabsf(dz) > g_cfg.maxHeightDiff) continue;
 
 			const UInt32 life = Engine::LifeState(actor);
 
@@ -266,7 +291,7 @@ namespace
 			if(dbg && dbgLines < 8)
 			{
 				++dbgLines;
-				_MESSAGE("probe-actor: formID %08X dist %.0f life=%u hostile=%d listed=%d", actor->formID, dist, (unsigned)life, hostile ? 1 : 0, listed ? 1 : 0);
+				_MESSAGE("probe-actor: formID %08X dist %.0f dz %.0f life=%u hostile=%d listed=%d", actor->formID, dist, dz, (unsigned)life, hostile ? 1 : 0, listed ? 1 : 0);
 			}
 
 			if(life != 0) continue;									// so vivos
@@ -288,11 +313,22 @@ namespace
 				score = dist;											// circulo: o mais proximo, em qualquer direcao
 			}
 
+			// Histerese opcional: o alvo atual so e trocado se outro for claramente mais perto.
+			if(actor->formID == g_lastTargetId && g_cfg.switchMargin > 0.0f)
+				score *= (1.0f - g_cfg.switchMargin / 100.0f);
+
 			if(score < bestScore)
 			{
 				bestScore = score;
 				*outYaw = yaw;
 				*outId = actor->formID;
+
+				const float aimZ = (pos.z + g_cfg.aimHeight) - (me.z + g_cfg.playerAimHeight);
+				float up = atan2f(aimZ, dist > 1.0f ? dist : 1.0f);
+				if(up >  limitRad) up =  limitRad;
+				if(up < -limitRad) up = -limitRad;
+				*outPitchUp = up;
+
 				found = true;
 			}
 		}
@@ -300,8 +336,8 @@ namespace
 	}
 
 	// ------------------------------------------------------------------ camera (experimental)
-	// No log, em terceira pessoa (estado 8 ou 9), a guinada da camera esta em 0x5C e 0x60 do estado
-	// da camera (acompanha a rotacao do jogador quando ha arma na mao).
+	// No log, em terceira pessoa (estado 8 ou 9): guinada da camera em 0x5C e 0x60, inclinacao
+	// em 0x54 e 0x58 do estado da camera. Com arma na mao a guinada acompanha o corpo.
 	UInt8 * ThirdPersonStatePtr()
 	{
 		PlayerCamera * cam = PlayerCamera::GetSingleton();
@@ -314,14 +350,40 @@ namespace
 
 	// ------------------------------------------------------------------ rotacao suave (thread)
 	volatile LONG	g_active	= 0;
+	volatile LONG	g_hasPitch	= 0;
+	volatile LONG	g_moveHeld	= 0;		// teclas de movimento carregadas (o regresso nao corre contra o TDM)
 	volatile DWORD	g_endTick	= 0;
 	volatile float	g_targetYaw	= 0.0f;
+	volatile float	g_targetPitchUp = 0.0f;
+
+	// Passo (com sinal) para aproximar 'cur' de 'target', com velocidade maxima e suavizacao.
+	float StepToward(float cur, float target, bool wrap, float dt, float maxSpeedRad)
+	{
+		const float delta = wrap ? WrapPi(target - cur) : (target - cur);
+		const float maxStep = maxSpeedRad * dt;
+		float want = delta;
+		if(g_cfg.smoothing > 0.0f) want = delta * (1.0f - expf(-g_cfg.smoothing * dt));
+		if(want >  maxStep) want =  maxStep;
+		if(want < -maxStep) want = -maxStep;
+		return want;
+	}
+
+	void CameraYawCompensate(UInt8 * cs, float step, float camYaw0)
+	{
+		if(!cs) return;
+		float * y1 = (float *)(cs + 0x5C);
+		float * y2 = (float *)(cs + 0x60);
+		if(g_cfg.cameraMode == 1)		{ *y1 -= step; *y2 -= step; }
+		else if(g_cfg.cameraMode == 2)	{ *y1 = camYaw0; *y2 = camYaw0; }
+	}
 
 	DWORD WINAPI TurnThread(LPVOID)
 	{
 		DWORD last = GetTickCount();
-		bool  session = false;			// ha um giro em curso (para o modo de camera 2)
-		float camYaw0 = 0.0f;
+		int   phase = 0;					// 0 = parado, 1 = a virar para o alvo, 2 = a regressar ao rumo original
+		float homeYaw = 0.0f, homePitch = 0.0f, camYaw0 = 0.0f, camPitch0 = 0.0f;
+		DWORD returnStart = 0;
+
 		for(;;)
 		{
 			Sleep((DWORD)g_cfg.updateMs);
@@ -330,76 +392,124 @@ namespace
 			last = now;
 			if(dt > 0.1f) dt = 0.1f;
 
-			if(!g_active) { session = false; continue; }
-			if((LONG)(now - g_endTick) >= 0) { g_active = 0; session = false; continue; }
+			if(g_active && (LONG)(now - g_endTick) >= 0) g_active = 0;
 
 			PlayerCharacter * player = Engine::Player();
-			if(!player) continue;
+			if(!player) { phase = 0; continue; }
 
-			UInt8 * camState = g_cfg.cameraMode ? ThirdPersonStatePtr() : NULL;
-			if(camState && !session) { camYaw0 = *(float *)(camState + 0x5C); session = true; }
-
+			const bool wantCam = (g_cfg.cameraMode != 0) || (g_cfg.verticalMode & 2);
+			UInt8 * cs = wantCam ? ThirdPersonStatePtr() : NULL;
 			NiPoint3 & rot = Engine::Rotation(player);
-			const float delta = WrapPi(g_targetYaw - rot.z);
-			const float maxStep = g_cfg.turnSpeedDeg * kPi / 180.0f * dt;
+			const float maxRad = g_cfg.turnSpeedDeg * kPi / 180.0f;
+			const float limitRad = g_cfg.verticalLimitDeg * kPi / 180.0f;
+			const float vSign = g_cfg.verticalInvert ? -1.0f : 1.0f;
 
-			// Suavizacao: com Smoothing > 0 o passo e proporcional a distancia que falta
-			// (movimento que abranda ao chegar), sempre limitado pela velocidade maxima.
-			float want = delta;
-			if(g_cfg.smoothing > 0.0f) want = delta * (1.0f - expf(-g_cfg.smoothing * dt));
-
-			float step = want;
-			if(step >  maxStep) step =  maxStep;
-			if(step < -maxStep) step = -maxStep;
-			rot.z = WrapPi(rot.z + step);
-
-			// Camera: 1 = tira a camera o mesmo giro que demos ao corpo; 2 = repoe a camera onde estava.
-			if(camState)
+			if(g_active)
 			{
-				float * y1 = (float *)(camState + 0x5C);
-				float * y2 = (float *)(camState + 0x60);
-				if(g_cfg.cameraMode == 1)		{ *y1 -= step; *y2 -= step; }
-				else if(g_cfg.cameraMode == 2)	{ *y1 = camYaw0; *y2 = camYaw0; }
+				if(phase == 0)
+				{
+					// Inicio de um giro: guarda de onde partimos, para podermos regressar.
+					homeYaw = rot.z;
+					homePitch = rot.x;
+					if(cs) { camYaw0 = *(float *)(cs + 0x5C); camPitch0 = *(float *)(cs + 0x54); }
+					phase = 1;
+				}
+				else if(phase == 2) phase = 1;		// novo golpe durante o regresso: continua a partir do mesmo rumo original
+
+				// Guinada do corpo.
+				const float stepYaw = StepToward(rot.z, g_targetYaw, true, dt, maxRad);
+				rot.z = WrapPi(rot.z + stepYaw);
+				CameraYawCompensate(cs, stepYaw, camYaw0);
+
+				// Mira vertical (magia).
+				if(g_hasPitch && g_cfg.verticalMode)
+				{
+					float up = g_targetPitchUp;
+					if(up >  limitRad) up =  limitRad;
+					if(up < -limitRad) up = -limitRad;
+
+					if(g_cfg.verticalMode & 1)
+						rot.x += StepToward(rot.x, -up * vSign, false, dt, maxRad);	// positivo = olhar para baixo
+					if((g_cfg.verticalMode & 2) && cs)
+					{
+						float * p1 = (float *)(cs + 0x54);
+						float * p2 = (float *)(cs + 0x58);
+						const float s = StepToward(*p1, camPitch0 - up * vSign, false, dt, maxRad);
+						*p1 += s; *p2 = *p1;
+					}
+				}
+			}
+			else if(phase == 1)
+			{
+				// O golpe acabou: regressa ao rumo original (a menos que o jogador esteja a andar).
+				if(g_cfg.returnToHeading && !g_moveHeld) { phase = 2; returnStart = now; }
+				else phase = 0;
+			}
+
+			if(phase == 2 && !g_active)
+			{
+				const float returnRad = g_cfg.returnSpeedDeg * kPi / 180.0f;
+
+				const float stepYaw = StepToward(rot.z, homeYaw, true, dt, returnRad);
+				rot.z = WrapPi(rot.z + stepYaw);
+				CameraYawCompensate(cs, stepYaw, camYaw0);
+				bool done = fabsf(WrapPi(homeYaw - rot.z)) < 0.01f;
+
+				if(g_cfg.verticalMode & 1)
+				{
+					rot.x += StepToward(rot.x, homePitch, false, dt, returnRad);
+					if(fabsf(homePitch - rot.x) >= 0.01f) done = false;
+				}
+				if((g_cfg.verticalMode & 2) && cs)
+				{
+					float * p1 = (float *)(cs + 0x54);
+					float * p2 = (float *)(cs + 0x58);
+					*p1 += StepToward(*p1, camPitch0, false, dt, returnRad);
+					*p2 = *p1;
+					if(fabsf(camPitch0 - *p1) >= 0.01f) done = false;
+				}
+
+				if(done || g_moveHeld || (LONG)(now - returnStart) >= g_cfg.returnMaxMs) phase = 0;
 			}
 		}
 	}
 
 	// ------------------------------------------------------------------ escolha + arranque
-	UInt32 g_lastTargetId = 0;
-
 	// Lock-on (Simple Lock-On / Coeus): o plugin nao sabe se o lock esta ativo, entao acompanha a
 	// tecla configurada em LockOnKey: cada toque liga/desliga. Enquanto "travado", fica em pausa.
 	bool	g_lockOn = false;
 	DWORD	g_lockNoEnemySince = 0;
 
-	// Escolhe o alvo e manda a thread vira-lo durante 'windowMs'.
-	bool AcquireAndTurn(int windowMs)
+	// Escolhe o alvo. Com 'extend' o giro e mantido durante 'windowMs'; sem 'extend' so se atualiza
+	// o alvo de um giro que ja esta em curso.
+	bool AcquireAndTurn(int windowMs, bool extend)
 	{
 		if(g_lockOn) return false;
 
 		PlayerCharacter * player = Engine::Player();
 		if(!player) return false;
 
-		float yaw = 0.0f;
+		float yaw = 0.0f, pitchUp = 0.0f;
 		UInt32 id = 0;
-		if(!FindTarget(player, &yaw, &id)) return false;
+		if(!FindTarget(player, &yaw, &pitchUp, &id)) return false;
 
 		if(g_cfg.verbose || id != g_lastTargetId)
-			_MESSAGE("target: formID %08X, turning toward yaw %.0f deg%s", id, yaw * 180.0f / kPi, g_cfg.logOnly ? " (LogOnly)" : "");
+			_MESSAGE("target: formID %08X, yaw %.0f deg, pitch %.0f deg%s", id, yaw * 180.0f / kPi, pitchUp * 180.0f / kPi, g_cfg.logOnly ? " (LogOnly)" : "");
 		g_lastTargetId = id;
 
 		if(g_cfg.logOnly) return true;
 
-		g_targetYaw	= yaw;
-		g_endTick	= GetTickCount() + (DWORD)windowMs;
-		g_active	= 1;
+		g_targetYaw = yaw;
+		g_targetPitchUp = pitchUp;
+		g_hasPitch = g_cfg.verticalMode ? 1 : 0;
+		if(extend || !g_active) g_endTick = GetTickCount() + (DWORD)windowMs;
+		g_active = 1;
 		return true;
 	}
 
 	// ------------------------------------------------------------------ diagnostico (so leitura)
 	// Com Probe=1 escreve no log, de meio em meio segundo: estado da camera, rotacao da camera e do
-	// jogador, alvo do jogo e alvo da mira. Serve para descobrir (a) qual valor da camera muda quando
-	// se roda a camera e (b) qual valor muda quando o Simple Lock-On trava um alvo.
+	// jogador, alvo do jogo e alvo da mira.
 	bool SafeReadWords(const void * src, UInt32 * dst, int count)
 	{
 		__try
@@ -456,9 +566,11 @@ namespace
 
 	// ------------------------------------------------------------------ botoes
 	bool	g_holdLeft = false, g_holdRight = false;
+	bool	g_kFwd = false, g_kBack = false, g_kLeft = false, g_kRight = false;
 	DWORD	g_lastHoldEvent = 0;
 	DWORD	g_lastScan = 0;
 
+	// Bloqueio continuo: re-escolhe o alvo de tempos a tempos enquanto o botao esta seguro.
 	void HoldTick()
 	{
 		const DWORD now = GetTickCount();
@@ -467,7 +579,16 @@ namespace
 		g_lastScan = now;
 
 		const int window = (2 * g_cfg.retargetMs > 120) ? 2 * g_cfg.retargetMs : 120;
-		AcquireAndTurn(window);
+		AcquireAndTurn(window, true);
+	}
+
+	// Durante um giro de toque: continua a reavaliar quem e o inimigo mais proximo.
+	void RetargetTick()
+	{
+		const DWORD now = GetTickCount();
+		if(now - g_lastScan < (DWORD)g_cfg.retargetMs) return;
+		g_lastScan = now;
+		AcquireAndTurn(0, false);
 	}
 
 	class InputSink : public BSTEventSink<InputEvent>
@@ -505,12 +626,11 @@ namespace
 				const bool held = (value != 0.0f);
 				const bool pressedNow = held && (button->timer == 0.0f);
 
+				const BSFixedString * control = button->GetControlID();
+
 				// Diagnostico: regista cada toque de tecla (para descobrir o codigo da tecla do lock-on).
 				if(g_cfg.probe && pressedNow)
-				{
-					const BSFixedString * c = button->GetControlID();
-					_MESSAGE("probe-key: device=%u code=%u control=%s", (unsigned)e->deviceType, (unsigned)button->keyMask, (c && c->data) ? c->data : "-");
-				}
+					_MESSAGE("probe-key: device=%u code=%u control=%s", (unsigned)e->deviceType, (unsigned)button->keyMask, (control && control->data) ? control->data : "-");
 
 				// Tecla do lock-on: cada toque liga/desliga o estado "travado".
 				if(g_cfg.lockOnKey && pressedNow && e->deviceType == kDeviceType_Keyboard && button->keyMask == (UInt32)g_cfg.lockOnKey)
@@ -521,8 +641,14 @@ namespace
 					_MESSAGE("lock-on key: assist %s", g_lockOn ? "PAUSED (lock-on assumed ON)" : "RESUMED (lock-on assumed OFF)");
 				}
 
-				const BSFixedString * control = button->GetControlID();
 				if(!control) continue;
+
+				// Teclas de movimento (o regresso ao rumo nao corre contra o TDM enquanto andas).
+				if(*control == strings->forward)			g_kFwd = held;
+				else if(*control == strings->back)			g_kBack = held;
+				else if(*control == strings->strafeLeft)	g_kLeft = held;
+				else if(*control == strings->strafeRight)	g_kRight = held;
+				g_moveHeld = (g_kFwd || g_kBack || g_kLeft || g_kRight) ? 1 : 0;
 
 				const bool isRight = (*control == strings->rightAttack);
 				const bool isLeft  = (*control == strings->leftAttack);
@@ -537,12 +663,12 @@ namespace
 				}
 
 				if(pressedNow && g_cfg.tapAssist)
-					AcquireAndTurn(g_cfg.holdMs);
+					AcquireAndTurn(g_cfg.holdMs, true);
 			}
 
-			// Bloqueio continuo: enquanto o botao esta seguro, re-escolhe o alvo de tempos a tempos.
 			const bool holding = ((g_cfg.holdMode & 1) && g_holdLeft) || ((g_cfg.holdMode & 2) && g_holdRight);
 			if(holding && (holdBtnSeen || GetTickCount() - g_lastHoldEvent <= 250)) HoldTick();
+			else if(g_active) RetargetTick();
 
 			return kEvent_Continue;
 		}
