@@ -5,12 +5,14 @@
 // suave. Nao usa Papyrus. Todas as afinacoes estao no SoftTargetLE.ini, que e relido sozinho
 // quando e guardado (nao precisa de reiniciar o jogo).
 //
-// ESTADO: versao 0.2.0, ainda por testar. Nao mexe na camera (ver README).
+// ESTADO: versao 0.2.1, ainda por testar. Nao mexe na camera; tem um modo de diagnostico (Probe=1)
+// que so LE dados da camera e do jogador para o log.
 // Licenca GPL-3.0. A base de compilacao e os enderecos vem do FreeClimb LE (GPL-3.0).
 
 #include "skse/PluginAPI.h"
 #include "skse/skse_version.h"
 #include "skse/GameRTTI.h"
+#include "skse/GameCamera.h"
 #include "Log.h"
 #include "Engine.h"
 
@@ -19,7 +21,7 @@
 #include <string.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.2.0 (ini fiel, circulo, bloqueio continuo, suavizacao)"
+#define PLUGIN_VERSION_STR	"0.2.1 (ini fiel, circulo, bloqueio continuo, suavizacao, diagnostico)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -41,6 +43,7 @@ namespace
 		int		enabled;		// 1 = ligado
 		int		logOnly;		// 1 = so escreve no log, nao vira o personagem
 		int		verbose;		// 1 = log detalhado
+		int		probe;			// 1 = diagnostico: escreve dados da camera/jogador no log (so leitura)
 		int		requireCombat;	// 1 = so inimigos ja em combate
 		int		shape;			// 0 = cone a frente, 1 = circulo a volta (360 graus)
 		float	range;			// alcance maximo (140 = ~2 m)
@@ -120,6 +123,7 @@ namespace
 		g_cfg.enabled		= ReadInt("Enabled", 1);
 		g_cfg.logOnly		= ReadInt("LogOnly", 0);
 		g_cfg.verbose		= ReadInt("Verbose", 0);
+		g_cfg.probe			= ReadInt("Probe", 0);
 		g_cfg.requireCombat	= ReadInt("RequireCombat", 1);
 		g_cfg.shape			= ReadInt("Shape", 0);
 		g_cfg.range			= ReadFloat("Range", 450.0f);
@@ -304,6 +308,64 @@ namespace
 		return true;
 	}
 
+	// ------------------------------------------------------------------ diagnostico (so leitura)
+	// Com Probe=1 escreve no log, de meio em meio segundo: estado da camera, rotacao da camera e do
+	// jogador, alvo do jogo e alvo da mira. Serve para descobrir (a) qual valor da camera muda quando
+	// se roda a camera e (b) qual valor muda quando o Simple Lock-On trava um alvo.
+	bool SafeReadWords(const void * src, UInt32 * dst, int count)
+	{
+		__try
+		{
+			for(int i = 0; i < count; ++i) dst[i] = ((const UInt32 *)src)[i];
+			return true;
+		}
+		__except(EXCEPTION_EXECUTE_HANDLER)
+		{
+			return false;
+		}
+	}
+
+	DWORD g_lastProbe = 0;
+
+	void ProbeTick()
+	{
+		const DWORD now = GetTickCount();
+		if(now - g_lastProbe < 500) return;
+		g_lastProbe = now;
+
+		PlayerCharacter * player = Engine::Player();
+		PlayerCamera * cam = PlayerCamera::GetSingleton();
+		if(!player || !cam) return;
+
+		UInt32 crosshair = 0;
+		CrosshairRefHandleHolder * ch = CrosshairRefHandleHolder::GetSingleton();
+		if(ch) crosshair = ch->CrosshairRefHandle();
+
+		const NiPoint3 rot = Engine::Rotation(player);
+		TESCameraState * st = cam->cameraState;
+
+		_MESSAGE("probe: state=%u camRotZ=%.3f camRotX=%.3f zoom=%.2f | player rotZ=%.3f rotX=%.3f targetHandle=%08X crosshair=%08X",
+				 st ? (unsigned)st->stateId : 0xFFFFu, cam->rotZ, cam->rotX, cam->zoom,
+				 rot.z, rot.x, (unsigned)player->targetHandle, (unsigned)crosshair);
+
+		if(st)
+		{
+			UInt32 w[48];
+			if(SafeReadWords(st, w, 48))
+			{
+				char line[1400];
+				int n = _snprintf_s(line, sizeof(line), _TRUNCATE, "probe-state:");
+				for(int i = 8; i < 48 && n > 0 && n < (int)sizeof(line) - 24; ++i)	// de 0x20 a 0xBC
+				{
+					float f;
+					memcpy(&f, &w[i], 4);
+					n += _snprintf_s(line + n, sizeof(line) - n, _TRUNCATE, " %02X=%.3f", i * 4, f);
+				}
+				_MESSAGE("%s", line);
+			}
+		}
+	}
+
 	// ------------------------------------------------------------------ botoes
 	bool	g_holdLeft = false, g_holdRight = false;
 	DWORD	g_lastHoldEvent = 0;
@@ -330,6 +392,7 @@ namespace
 			if(!g_cfg.enabled) return kEvent_Continue;
 
 			MaybeReloadConfig();
+			if(g_cfg.probe) ProbeTick();
 
 			bool holdBtnSeen = false;
 			for(InputEvent * e = *events; e; e = e->next)
