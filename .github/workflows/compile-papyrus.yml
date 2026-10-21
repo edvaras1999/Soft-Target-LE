@@ -58,28 +58,45 @@ jobs:
           $out = Join-Path $ws 'out'
           New-Item -ItemType Directory -Force $out | Out-Null
           Set-Location $ws
-          "=== ajuda do Caprica ===" | Out-File $log
-          & $env:CAPRICA --help 2>&1 | Out-File $log -Append
-          $stubs = 'papyrus\stubs'; $src = 'papyrus\src'; $flags = 'papyrus\TESV_Papyrus_Flags.flg'
-          $files = @("$src\SoftTargetNative.psc", "$src\SoftTargetMCM.psc")
-          # Varias formas de chamar (as opcoes mudam entre versoes). Usa a primeira que funcionar.
-          $tries = @(
-            @('--game', 'skyrim', '--flags', $flags, '--import', "$stubs;$src", '--output', $out) + $files,
-            @('--game', 'skyrim', '-f', $flags, '-i', "$stubs;$src", '-o', $out) + $files,
-            @('--game', 'skyrim', '-f', $flags, '-i', $stubs, '-i', $src, '-o', $out) + $files
-          )
+
+          # Caminhos absolutos: assim o Caprica nao mistura os nossos scripts com a pasta do repositorio.
+          $stubs = Join-Path $ws 'papyrus\stubs'
+          $src   = Join-Path $ws 'papyrus\src'
+          $flags = Join-Path $ws 'papyrus\TESV_Papyrus_Flags.flg'
+          $files = @((Join-Path $src 'SoftTargetNative.psc'), (Join-Path $src 'SoftTargetMCM.psc'))
+
+          '=== inicio ===' | Out-File $log
+
+          # Lista de tentativas (cada uma e uma lista de argumentos). As opcoes sao as da ajuda do Caprica v0.3.0.
+          $tries = New-Object System.Collections.ArrayList
+          [void]$tries.Add(@('--game', 'skyrim', '--flags', $flags, '--ignorecwd', '--import', $stubs, '--import', $src, '--output', $out) + $files)
+          [void]$tries.Add(@('--game', 'skyrim', '--flags', $flags, '--import', $stubs, '--import', $src, '--output', $out) + $files)
+          [void]$tries.Add(@('--game', 'skyrim', '--flags', $flags, '--ignorecwd', '--import', "$stubs;$src", '--output', $out) + $files)
+
           $ok = $false
           $n = 0
           foreach ($t in $tries) {
             $n++
             "=== tentativa $n : $($t -join ' ') ===" | Out-File $log -Append
-            Remove-Item "$out\*" -Force -ErrorAction SilentlyContinue
+            Get-ChildItem $out -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
             & $env:CAPRICA @t 2>&1 | Tee-Object -FilePath $log -Append
-            if ($LASTEXITCODE -eq 0 -and (Test-Path "$out\SoftTargetMCM.pex") -and (Test-Path "$out\SoftTargetNative.pex")) { $ok = $true; break }
+            $code = $LASTEXITCODE
+            $mcm = Get-ChildItem $out -Recurse -Filter 'SoftTargetMCM.pex' -ErrorAction SilentlyContinue | Select-Object -First 1
+            $nat = Get-ChildItem $out -Recurse -Filter 'SoftTargetNative.pex' -ErrorAction SilentlyContinue | Select-Object -First 1
+            "codigo de saida: $code ; MCM.pex: $([bool]$mcm) ; Native.pex: $([bool]$nat)" | Tee-Object -FilePath $log -Append
+            if ($code -eq 0 -and $mcm -and $nat) {
+              # Poe os dois .pex na raiz da pasta out (o Caprica pode cria-los em subpastas).
+              foreach ($f in @($mcm, $nat)) {
+                $dst = Join-Path $out $f.Name
+                if ($f.FullName -ne $dst) { Copy-Item $f.FullName $dst -Force }
+              }
+              $ok = $true
+              break
+            }
           }
           if (-not $ok) { Write-Host '=== TODAS AS TENTATIVAS FALHARAM (veja o artefato papyrus) ==='; exit 1 }
           Write-Host 'Compilou.'
-          Get-ChildItem $out | Format-Table Name, Length
+          Get-ChildItem $out -Recurse | Format-Table FullName, Length
 
       - name: Guardar o resultado
         if: always()
