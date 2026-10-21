@@ -1,0 +1,46 @@
+name: Extrair cabecalhos do SKSE (diagnostico)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  headers:
+    runs-on: windows-latest
+    steps:
+      - name: Baixar o repositorio
+        uses: actions/checkout@v4
+
+      - name: Obter e extrair o SKSE
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ws = $env:GITHUB_WORKSPACE
+          $archive = Join-Path $ws 'skse.7z'
+          $local = Join-Path $ws 'third_party\skse_1_07_03.7z'
+          if (Test-Path $local) {
+            Copy-Item $local $archive
+          } else {
+            $ok = $false
+            foreach ($try in 1..4) {
+              foreach ($u in 'https://skse.silverlock.org/beta/skse_1_07_03.7z', 'http://skse.silverlock.org/beta/skse_1_07_03.7z') {
+                try { Invoke-WebRequest -Uri $u -OutFile $archive -UserAgent 'Mozilla/5.0'; $ok = $true; break }
+                catch { Write-Host "Falhou: $($_.Exception.Message)" }
+              }
+              if ($ok) { break }
+              Start-Sleep -Seconds 20
+            }
+            if (-not $ok) { throw 'Nao consegui baixar o SKSE.' }
+          }
+          & "C:\Program Files\7-Zip\7z.exe" x $archive "-o$ws\skse_src" -y | Out-Null
+          $hdr = Get-ChildItem "$ws\skse_src" -Recurse -Filter PluginAPI.h | Select-Object -First 1
+          if (-not $hdr) { throw 'Nao encontrei PluginAPI.h' }
+          $out = Join-Path $ws 'out'
+          New-Item -ItemType Directory -Force $out | Out-Null
+          Copy-Item (Join-Path $hdr.Directory.FullName '*.h') $out
+          Get-ChildItem $out | Format-Table Name, Length
+
+      - name: Guardar
+        uses: actions/upload-artifact@v4
+        with:
+          name: skse-headers
+          path: out
