@@ -5,8 +5,8 @@
 // suave. Nao usa Papyrus. Todas as afinacoes estao no SoftTargetLE.ini, que e relido sozinho
 // quando e guardado (nao precisa de reiniciar o jogo).
 //
-// ESTADO: versao 0.2.1, ainda por testar. Nao mexe na camera; tem um modo de diagnostico (Probe=1)
-// que so LE dados da camera e do jogador para o log.
+// ESTADO: versao 0.3.0 (experimental). Novidades: inimigos reanimados, compensacao da camera
+// (CameraMode), pausa com a tecla do lock-on (LockOnKey) e mais diagnostico (Probe=1).
 // Licenca GPL-3.0. A base de compilacao e os enderecos vem do FreeClimb LE (GPL-3.0).
 
 #include "skse/PluginAPI.h"
@@ -21,7 +21,7 @@
 #include <string.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.2.1 (ini fiel, circulo, bloqueio continuo, suavizacao, diagnostico)"
+#define PLUGIN_VERSION_STR	"0.3.0 (reanimados, camera, lock-on, diagnostico)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -43,7 +43,10 @@ namespace
 		int		enabled;		// 1 = ligado
 		int		logOnly;		// 1 = so escreve no log, nao vira o personagem
 		int		verbose;		// 1 = log detalhado
-		int		probe;			// 1 = diagnostico: escreve dados da camera/jogador no log (so leitura)
+		int		probe;			// 1 = diagnostico: escreve dados da camera/jogador/teclas no log (so leitura)
+		int		useHostileList;	// 1 = tambem aceita quem o jogo ja lista como hostil ao jogador (ajuda com reanimados)
+		int		cameraMode;		// 0 = nao mexe; 1 = contra-rotacao da camera; 2 = camera fica parada durante o giro
+		int		lockOnKey;		// codigo da tecla do lock-on (F = 33); 0 = desligado
 		int		requireCombat;	// 1 = so inimigos ja em combate
 		int		shape;			// 0 = cone a frente, 1 = circulo a volta (360 graus)
 		float	range;			// alcance maximo (140 = ~2 m)
@@ -124,6 +127,9 @@ namespace
 		g_cfg.logOnly		= ReadInt("LogOnly", 0);
 		g_cfg.verbose		= ReadInt("Verbose", 0);
 		g_cfg.probe			= ReadInt("Probe", 0);
+		g_cfg.useHostileList = ReadInt("UseHostileList", 1);
+		g_cfg.cameraMode	= ReadInt("CameraMode", 0);
+		g_cfg.lockOnKey		= ReadInt("LockOnKey", 0);
 		g_cfg.requireCombat	= ReadInt("RequireCombat", 1);
 		g_cfg.shape			= ReadInt("Shape", 0);
 		g_cfg.range			= ReadFloat("Range", 450.0f);
@@ -140,11 +146,11 @@ namespace
 		if(g_cfg.updateMs > 50)		g_cfg.updateMs = 50;
 		if(g_cfg.retargetMs < 16)	g_cfg.retargetMs = 16;
 
-		_MESSAGE("config (%s%s): enabled=%d logOnly=%d shape=%s range=%.0f cone=%.0f turn=%.0f smooth=%.1f update=%dms tap=%d hold=%d retarget=%dms combat=%d",
+		_MESSAGE("config (%s%s): enabled=%d logOnly=%d shape=%s range=%.0f cone=%.0f turn=%.0f smooth=%.1f update=%dms tap=%d hold=%d retarget=%dms combat=%d camera=%d lockKey=%d hostileList=%d",
 				 found ? "ini: " : "NO ini found, defaults; looked for: ", g_iniPath[0] ? g_iniPath : PLUGIN_INI_NAME,
 				 g_cfg.enabled, g_cfg.logOnly, g_cfg.shape ? "circle" : "cone", g_cfg.range, g_cfg.coneDeg,
 				 g_cfg.turnSpeedDeg, g_cfg.smoothing, g_cfg.updateMs, g_cfg.tapAssist, g_cfg.holdMode,
-				 g_cfg.retargetMs, g_cfg.requireCombat);
+				 g_cfg.retargetMs, g_cfg.requireCombat, g_cfg.cameraMode, g_cfg.lockOnKey, g_cfg.useHostileList);
 	}
 
 	// Relê o .ini se ele mudou (verifica no maximo uma vez por segundo).
@@ -175,6 +181,34 @@ namespace
 	}
 
 	// ------------------------------------------------------------------ escolha do alvo
+	// Inimigos que o proprio jogo ja tem em combate com o jogador (PlayerCharacter::hostileHandles,
+	// offset 0x630: ponteiro + capacidade + tamanho). Ajuda com reanimados e invocados, para os
+	// quais a pergunta "e hostil?" as vezes responde que nao.
+	int CollectHostileIds(PlayerCharacter * player, UInt32 * ids, int maxIds)
+	{
+		const UInt32 * raw = (const UInt32 *)((UInt8 *)player + 0x630);
+		const UInt32 * data = (const UInt32 *)raw[0];
+		UInt32 count = (raw[1] < raw[2]) ? raw[1] : raw[2];
+		if(!data || count == 0) return 0;
+		if(count > (UInt32)maxIds) count = (UInt32)maxIds;
+
+		int n = 0;
+		for(UInt32 i = 0; i < count; ++i)
+		{
+			UInt32 handle = data[i];
+			if(!handle) continue;
+			TESObjectREFR * ref = NULL;
+			if(LookupREFRByHandle(&handle, &ref) && ref)
+			{
+				ids[n++] = ref->formID;
+				ref->handleRefObject.DecRefHandle();
+			}
+		}
+		return n;
+	}
+
+	DWORD g_lastActorLog = 0;
+
 	// Devolve true se encontrou um alvo; escreve a guinada desejada e o formID.
 	bool FindTarget(Actor * player, float * outYaw, UInt32 * outId)
 	{
@@ -185,6 +219,13 @@ namespace
 		const float facing		= Engine::Rotation(player).z;
 		const float halfCone	= (g_cfg.coneDeg * 0.5f) * kPi / 180.0f;
 		const bool  cone		= (g_cfg.shape == 0);
+
+		UInt32 hostileIds[64];
+		const int hostileCount = g_cfg.useHostileList ? CollectHostileIds((PlayerCharacter *)player, hostileIds, 64) : 0;
+
+		bool dbg = false;
+		int dbgLines = 0;
+		if(g_cfg.probe && GetTickCount() - g_lastActorLog > 1000) { dbg = true; g_lastActorLog = GetTickCount(); }
 
 		float bestScore = 1e30f;
 		bool found = false;
@@ -206,11 +247,6 @@ namespace
 
 			Actor * actor = DYNAMIC_CAST(ref, TESObjectREFR, Actor);
 			if(!actor) continue;
-			if(Engine::LifeState(actor) != 0) continue;			// so vivos
-
-			// So inimigos: hostil ao jogador (funcao do proprio jogo).
-			if(!CALL_MEMBER_FN(actor, IsHostileToActor)(player)) continue;
-			if(g_cfg.requireCombat && !actor->IsInCombat()) continue;
 
 			const NiPoint3 pos = Engine::Position(actor);
 			const float dx = pos.x - me.x;
@@ -218,6 +254,24 @@ namespace
 			const float dz = pos.z - me.z;
 			const float dist = sqrtf(dx * dx + dy * dy);
 			if(dist > g_cfg.range || fabsf(dz) > 250.0f) continue;
+
+			const UInt32 life = Engine::LifeState(actor);
+
+			bool listed = false;
+			for(int j = 0; j < hostileCount; ++j) if(hostileIds[j] == actor->formID) { listed = true; break; }
+
+			// Hostil ao jogador: funcao do proprio jogo OU presente na lista de hostis do jogador.
+			const bool hostile = listed || CALL_MEMBER_FN(actor, IsHostileToActor)(player);
+
+			if(dbg && dbgLines < 8)
+			{
+				++dbgLines;
+				_MESSAGE("probe-actor: formID %08X dist %.0f life=%u hostile=%d listed=%d", actor->formID, dist, (unsigned)life, hostile ? 1 : 0, listed ? 1 : 0);
+			}
+
+			if(life != 0) continue;									// so vivos
+			if(!hostile) continue;
+			if(g_cfg.requireCombat && !actor->IsInCombat()) continue;
 
 			const float yaw = atan2f(dx, dy);
 			const float off = fabsf(WrapPi(yaw - facing));
@@ -245,6 +299,19 @@ namespace
 		return found;
 	}
 
+	// ------------------------------------------------------------------ camera (experimental)
+	// No log, em terceira pessoa (estado 8 ou 9), a guinada da camera esta em 0x5C e 0x60 do estado
+	// da camera (acompanha a rotacao do jogador quando ha arma na mao).
+	UInt8 * ThirdPersonStatePtr()
+	{
+		PlayerCamera * cam = PlayerCamera::GetSingleton();
+		if(!cam) return NULL;
+		TESCameraState * st = cam->cameraState;
+		if(!st) return NULL;
+		if(st->stateId != PlayerCamera::kCameraState_ThirdPerson1 && st->stateId != PlayerCamera::kCameraState_ThirdPerson2) return NULL;
+		return (UInt8 *)st;
+	}
+
 	// ------------------------------------------------------------------ rotacao suave (thread)
 	volatile LONG	g_active	= 0;
 	volatile DWORD	g_endTick	= 0;
@@ -253,6 +320,8 @@ namespace
 	DWORD WINAPI TurnThread(LPVOID)
 	{
 		DWORD last = GetTickCount();
+		bool  session = false;			// ha um giro em curso (para o modo de camera 2)
+		float camYaw0 = 0.0f;
 		for(;;)
 		{
 			Sleep((DWORD)g_cfg.updateMs);
@@ -261,11 +330,14 @@ namespace
 			last = now;
 			if(dt > 0.1f) dt = 0.1f;
 
-			if(!g_active) continue;
-			if((LONG)(now - g_endTick) >= 0) { g_active = 0; continue; }
+			if(!g_active) { session = false; continue; }
+			if((LONG)(now - g_endTick) >= 0) { g_active = 0; session = false; continue; }
 
 			PlayerCharacter * player = Engine::Player();
 			if(!player) continue;
+
+			UInt8 * camState = g_cfg.cameraMode ? ThirdPersonStatePtr() : NULL;
+			if(camState && !session) { camYaw0 = *(float *)(camState + 0x5C); session = true; }
 
 			NiPoint3 & rot = Engine::Rotation(player);
 			const float delta = WrapPi(g_targetYaw - rot.z);
@@ -280,15 +352,31 @@ namespace
 			if(step >  maxStep) step =  maxStep;
 			if(step < -maxStep) step = -maxStep;
 			rot.z = WrapPi(rot.z + step);
+
+			// Camera: 1 = tira a camera o mesmo giro que demos ao corpo; 2 = repoe a camera onde estava.
+			if(camState)
+			{
+				float * y1 = (float *)(camState + 0x5C);
+				float * y2 = (float *)(camState + 0x60);
+				if(g_cfg.cameraMode == 1)		{ *y1 -= step; *y2 -= step; }
+				else if(g_cfg.cameraMode == 2)	{ *y1 = camYaw0; *y2 = camYaw0; }
+			}
 		}
 	}
 
 	// ------------------------------------------------------------------ escolha + arranque
 	UInt32 g_lastTargetId = 0;
 
+	// Lock-on (Simple Lock-On / Coeus): o plugin nao sabe se o lock esta ativo, entao acompanha a
+	// tecla configurada em LockOnKey: cada toque liga/desliga. Enquanto "travado", fica em pausa.
+	bool	g_lockOn = false;
+	DWORD	g_lockNoEnemySince = 0;
+
 	// Escolhe o alvo e manda a thread vira-lo durante 'windowMs'.
 	bool AcquireAndTurn(int windowMs)
 	{
+		if(g_lockOn) return false;
+
 		PlayerCharacter * player = Engine::Player();
 		if(!player) return false;
 
@@ -394,22 +482,51 @@ namespace
 			MaybeReloadConfig();
 			if(g_cfg.probe) ProbeTick();
 
+			// O lock-on desliga-se sozinho quando ja nao ha inimigos em combate (2 s seguidos).
+			if(g_lockOn)
+			{
+				PlayerCharacter * p = Engine::Player();
+				UInt32 tmp[8];
+				if(p && CollectHostileIds(p, tmp, 8) == 0)
+				{
+					if(!g_lockNoEnemySince) g_lockNoEnemySince = GetTickCount();
+					else if(GetTickCount() - g_lockNoEnemySince > 2000) { g_lockOn = false; g_lockNoEnemySince = 0; _MESSAGE("lock-on assumed OFF (no enemies in combat)"); }
+				}
+				else g_lockNoEnemySince = 0;
+			}
+
 			bool holdBtnSeen = false;
 			for(InputEvent * e = *events; e; e = e->next)
 			{
 				if(e->eventType != InputEvent::kEventType_Button) continue;
 
 				ButtonEvent * button = (ButtonEvent *)e;
+				const float value = *(float *)&button->flags;
+				const bool held = (value != 0.0f);
+				const bool pressedNow = held && (button->timer == 0.0f);
+
+				// Diagnostico: regista cada toque de tecla (para descobrir o codigo da tecla do lock-on).
+				if(g_cfg.probe && pressedNow)
+				{
+					const BSFixedString * c = button->GetControlID();
+					_MESSAGE("probe-key: device=%u code=%u control=%s", (unsigned)e->deviceType, (unsigned)button->keyMask, (c && c->data) ? c->data : "-");
+				}
+
+				// Tecla do lock-on: cada toque liga/desliga o estado "travado".
+				if(g_cfg.lockOnKey && pressedNow && e->deviceType == kDeviceType_Keyboard && button->keyMask == (UInt32)g_cfg.lockOnKey)
+				{
+					g_lockOn = !g_lockOn;
+					g_lockNoEnemySince = 0;
+					if(g_lockOn) g_active = 0;
+					_MESSAGE("lock-on key: assist %s", g_lockOn ? "PAUSED (lock-on assumed ON)" : "RESUMED (lock-on assumed OFF)");
+				}
+
 				const BSFixedString * control = button->GetControlID();
 				if(!control) continue;
 
 				const bool isRight = (*control == strings->rightAttack);
 				const bool isLeft  = (*control == strings->leftAttack);
 				if(!isRight && !isLeft) continue;
-
-				const float value = *(float *)&button->flags;
-				const bool held = (value != 0.0f);
-				const bool pressedNow = held && (button->timer == 0.0f);
 
 				if(isRight) g_holdRight = held; else g_holdLeft = held;
 
