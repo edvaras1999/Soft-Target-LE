@@ -1,4 +1,4 @@
-Scriptname SoftTargetNative Hidden
+Scriptname SoftTargetNative Native Hidden
 { Funcoes implementadas pela DLL SoftTargetLE. O menu le e grava as opcoes por aqui,
   e a DLL grava o .ini a cada mudanca, entao menu e .ini nunca divergem.
   Sem a DLL carregada, estas funcoes devolvem valores vazios. }
