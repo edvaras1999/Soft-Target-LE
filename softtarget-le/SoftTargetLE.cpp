@@ -25,7 +25,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.5.0 (menu, camera por deslocamento, lock-on real, botoes extras)"
+#define PLUGIN_VERSION_STR	"0.6.0 (perfis Vanilla/Coeus, combo sticky, menu)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -76,6 +76,10 @@ namespace
 		int		verticalInvert;	// 1 = inverte o sentido da inclinacao
 		float	verticalLimitDeg;// inclinacao maxima, em graus
 		int		language;		// idioma do menu: 0 = ingles, 1 = portugues
+		int		profile;		// 0 = automatico (Coeus se o movimento direcional esta ativo), 1 = sem TDM, 2 = Coeus (TDM)
+		int		cameraModeCoeus;// camera no perfil Coeus (0 = nao mexe, recomendado)
+		int		stickyTarget;	// 1 = durante uma sequencia de golpes mantem o alvo enquanto for valido
+		int		allowReanimated;// 1 = aceita inimigos reanimados / sem estado de vida normal
 	};
 	Config g_cfg;
 
@@ -107,13 +111,17 @@ namespace
 		{ "CameraMode",				'i', &g_cfg.cameraMode,			0.0f },
 		{ "LockOnKey",				'i', &g_cfg.lockOnKey,			0.0f },
 		{ "LockOnMode",				'i', &g_cfg.lockOnMode,			0.0f },
-		{ "CoeusYield",				'i', &g_cfg.coeusYield,			0.0f },
+		{ "CoeusYield",				'i', &g_cfg.coeusYield,			1.0f },
 		{ "VerticalMode",			'i', &g_cfg.verticalMode,		0.0f },
 		{ "AimHeight",				'f', &g_cfg.aimHeight,			100.0f },
 		{ "PlayerAimHeight",		'f', &g_cfg.playerAimHeight,	110.0f },
 		{ "VerticalInvert",			'i', &g_cfg.verticalInvert,		0.0f },
 		{ "VerticalLimitDegrees",	'f', &g_cfg.verticalLimitDeg,	45.0f },
 		{ "Language",				'i', &g_cfg.language,			0.0f },
+		{ "Profile",				'i', &g_cfg.profile,			0.0f },
+		{ "CameraModeCoeus",		'i', &g_cfg.cameraModeCoeus,	0.0f },
+		{ "StickyTarget",			'i', &g_cfg.stickyTarget,		1.0f },
+		{ "AllowReanimated",		'i', &g_cfg.allowReanimated,	1.0f },
 	};
 	const int kNumOpts = sizeof(g_opts) / sizeof(g_opts[0]);
 
@@ -244,6 +252,67 @@ namespace
 		}
 	}
 
+	// ------------------------------------------------------------------ DLLs opcionais (Coeus, LockOn)
+	typedef bool (*FnVoidBool)(void);
+	typedef void (*FnSetExternal)(bool active, UInt32 handle);
+
+	FnVoidBool		g_sloIsLockOn	= NULL;		// LockOn.dll: SLO_IsLockOnActive
+	FnSetExternal	g_coeusExternal	= NULL;		// Coeus.dll: Coeus_SetExternalLockOnActive
+	FnVoidBool		g_coeusDirActive = NULL;	// Coeus.dll: Coeus_IsDirectionalMovementActive
+
+	void ResolveExternal()
+	{
+		HMODULE h = GetModuleHandleA("LockOn.dll");
+		if(h) g_sloIsLockOn = (FnVoidBool)GetProcAddress(h, "SLO_IsLockOnActive");
+		h = GetModuleHandleA("Coeus.dll");
+		if(h) g_coeusExternal = (FnSetExternal)GetProcAddress(h, "Coeus_SetExternalLockOnActive");
+		if(h) g_coeusDirActive = (FnVoidBool)GetProcAddress(h, "Coeus_IsDirectionalMovementActive");
+		_MESSAGE("external: Coeus directional-movement query %s", g_coeusDirActive ? "FOUND" : "not found");
+		_MESSAGE("external: LockOn.dll lock-on query %s, Coeus.dll external lock %s",
+				 g_sloIsLockOn ? "FOUND" : "not found (F key fallback)", g_coeusExternal ? "FOUND" : "not found");
+	}
+
+	// ------------------------------------------------------------------ matematica de angulos
+	// No Skyrim a rotacao Z (guinada) e medida a partir de +Y, no sentido horario:
+	// a direcao (dx, dy) corresponde a atan2(dx, dy).
+	float WrapPi(float a)
+	{
+		while(a >  kPi) a -= 2.0f * kPi;
+		while(a < -kPi) a += 2.0f * kPi;
+		return a;
+	}
+
+	// ------------------------------------------------------------------ lock-on
+	// Estado real vindo da LockOn.dll, se existir; senao, o ultimo toque na tecla LockOnKey.
+	bool			g_lockKeyState = false;
+	DWORD			g_lockNoEnemySince = 0;
+	volatile LONG	g_lockActive = 0;
+
+	bool QueryLockOn()
+	{
+		if(g_sloIsLockOn)
+		{
+			__try { return g_sloIsLockOn(); }
+			__except(EXCEPTION_EXECUTE_HANDLER) { g_sloIsLockOn = NULL; return false; }
+		}
+		return g_lockKeyState;
+	}
+
+	// Perfil efetivo: true = Coeus (TDM) ativo. Em automatico pergunta ao Coeus a cada chamada.
+	bool InCoeusProfile()
+	{
+		if(g_cfg.profile == 1) return false;
+		if(g_cfg.profile == 2) return true;
+		if(g_coeusDirActive)
+		{
+			__try { return g_coeusDirActive(); }
+			__except(EXCEPTION_EXECUTE_HANDLER) { g_coeusDirActive = NULL; return false; }
+		}
+		return false;
+	}
+
+	int EffCameraMode() { return InCoeusProfile() ? g_cfg.cameraModeCoeus : g_cfg.cameraMode; }
+
 	// ------------------------------------------------------------------ funcoes nativas (menu)
 	const Opt * FindOpt(const char * key)
 	{
@@ -280,6 +349,7 @@ namespace
 		if(g_cfg.updateMs > 50)		g_cfg.updateMs = 50;
 		if(g_cfg.retargetMs < 16)	g_cfg.retargetMs = 16;
 
+		_MESSAGE("menu: %s = %s", o->key, buf);
 		if(g_iniPath[0])
 		{
 			WritePrivateProfileStringA("SoftTarget", o->key, buf, g_iniPath);
@@ -295,6 +365,51 @@ namespace
 	void	N_SetFloat(StaticFunctionTag *, BSFixedString key, float value)		{ SetOpt(key.data, value); }
 	void	N_Reload(StaticFunctionTag *)										{ LoadConfig(); }
 
+	void WriteOptToIni(const Opt * o)
+	{
+		char buf[48];
+		if(o->type == 'i') _snprintf_s(buf, sizeof(buf), _TRUNCATE, "%d", *(int *)o->ptr);
+		else			   _snprintf_s(buf, sizeof(buf), _TRUNCATE, "%.3f", *(float *)o->ptr);
+		WritePrivateProfileStringA("SoftTarget", o->key, buf, g_iniPath);
+	}
+
+	// Grava TODAS as opcoes no .ini (botao "Save now" do menu).
+	void N_SaveAll(StaticFunctionTag *)
+	{
+		if(g_iniPath[0])
+		{
+			for(int i = 0; i < kNumOpts; ++i) WriteOptToIni(&g_opts[i]);
+			RefreshIniStamp();
+		}
+		_MESSAGE("menu: all options saved to the ini");
+	}
+
+	// Repoe os valores de fabrica (botao "Reset" do menu) e grava. Mantem o idioma.
+	void N_ResetDefaults(StaticFunctionTag *)
+	{
+		for(int i = 0; i < kNumOpts; ++i)
+		{
+			if(_stricmp(g_opts[i].key, "Language") == 0) continue;
+			if(g_opts[i].type == 'i') *(int *)g_opts[i].ptr = (int)g_opts[i].def;
+			else					  *(float *)g_opts[i].ptr = g_opts[i].def;
+		}
+		N_SaveAll(NULL);
+		_MESSAGE("menu: defaults restored");
+	}
+
+	// Estado para o menu: 0 = perfil efetivo (1 sem TDM, 2 Coeus), 1 = LockOn.dll, 2 = Coeus.dll (0/1), 3 = lock-on ativo
+	SInt32 N_Status(StaticFunctionTag *, SInt32 what)
+	{
+		switch(what)
+		{
+			case 0: return InCoeusProfile() ? 2 : 1;
+			case 1: return g_sloIsLockOn ? 1 : 0;
+			case 2: return (g_coeusExternal || g_coeusDirActive) ? 1 : 0;
+			case 3: return g_lockActive ? 1 : 0;
+		}
+		return 0;
+	}
+
 	bool RegisterPapyrus(VMClassRegistry * registry)
 	{
 		registry->RegisterFunction(new NativeFunction1 <StaticFunctionTag, bool, BSFixedString>("GetBool", "SoftTargetNative", N_GetBool, registry));
@@ -304,55 +419,16 @@ namespace
 		registry->RegisterFunction(new NativeFunction2 <StaticFunctionTag, void, BSFixedString, SInt32>("SetInt", "SoftTargetNative", N_SetInt, registry));
 		registry->RegisterFunction(new NativeFunction2 <StaticFunctionTag, void, BSFixedString, float>("SetFloat", "SoftTargetNative", N_SetFloat, registry));
 		registry->RegisterFunction(new NativeFunction0 <StaticFunctionTag, void>("Reload", "SoftTargetNative", N_Reload, registry));
+		registry->RegisterFunction(new NativeFunction0 <StaticFunctionTag, void>("SaveAll", "SoftTargetNative", N_SaveAll, registry));
+		registry->RegisterFunction(new NativeFunction0 <StaticFunctionTag, void>("ResetDefaults", "SoftTargetNative", N_ResetDefaults, registry));
+		registry->RegisterFunction(new NativeFunction1 <StaticFunctionTag, SInt32, SInt32>("Status", "SoftTargetNative", N_Status, registry));
 		_MESSAGE("papyrus functions registered (SoftTargetNative)");
 		return true;
 	}
 
-	// ------------------------------------------------------------------ DLLs opcionais (Coeus, LockOn)
-	typedef bool (*FnVoidBool)(void);
-	typedef void (*FnSetExternal)(bool active, UInt32 handle);
-
-	FnVoidBool		g_sloIsLockOn	= NULL;		// LockOn.dll: SLO_IsLockOnActive
-	FnSetExternal	g_coeusExternal	= NULL;		// Coeus.dll: Coeus_SetExternalLockOnActive
-
-	void ResolveExternal()
-	{
-		HMODULE h = GetModuleHandleA("LockOn.dll");
-		if(h) g_sloIsLockOn = (FnVoidBool)GetProcAddress(h, "SLO_IsLockOnActive");
-		h = GetModuleHandleA("Coeus.dll");
-		if(h) g_coeusExternal = (FnSetExternal)GetProcAddress(h, "Coeus_SetExternalLockOnActive");
-		_MESSAGE("external: LockOn.dll lock-on query %s, Coeus.dll external lock %s",
-				 g_sloIsLockOn ? "FOUND" : "not found (F key fallback)", g_coeusExternal ? "FOUND" : "not found");
-	}
-
-	// ------------------------------------------------------------------ matematica de angulos
-	// No Skyrim a rotacao Z (guinada) e medida a partir de +Y, no sentido horario:
-	// a direcao (dx, dy) corresponde a atan2(dx, dy).
-	float WrapPi(float a)
-	{
-		while(a >  kPi) a -= 2.0f * kPi;
-		while(a < -kPi) a += 2.0f * kPi;
-		return a;
-	}
-
-	// ------------------------------------------------------------------ lock-on
-	// Estado real vindo da LockOn.dll, se existir; senao, o ultimo toque na tecla LockOnKey.
-	bool			g_lockKeyState = false;
-	DWORD			g_lockNoEnemySince = 0;
-	volatile LONG	g_lockActive = 0;
-
-	bool QueryLockOn()
-	{
-		if(g_sloIsLockOn)
-		{
-			__try { return g_sloIsLockOn(); }
-			__except(EXCEPTION_EXECUTE_HANDLER) { g_sloIsLockOn = NULL; return false; }
-		}
-		return g_lockKeyState;
-	}
-
 	// ------------------------------------------------------------------ escolha do alvo
 	UInt32 g_lastTargetId = 0;
+	volatile LONG	g_active	= 0;		// 1 = sequencia de golpes em curso (o corpo encara o alvo)
 
 	// Inimigos que o proprio jogo ja tem em combate com o jogador (PlayerCharacter::hostileHandles,
 	// offset 0x630: ponteiro + capacidade + tamanho). Ajuda com reanimados e invocados.
@@ -447,9 +523,10 @@ namespace
 				_MESSAGE("probe-actor: formID %08X dist %.0f dz %.0f life=%u hostile=%d listed=%d", actor->formID, dist, dz, (unsigned)life, hostile ? 1 : 0, listed ? 1 : 0);
 			}
 
-			if(life != 0) continue;									// so vivos
+			// Vivos (0) ou, se permitido, em "reanimacao" (4); o resto (morto, a morrer, inconsciente...) nao.
+			if(life != 0 && !(g_cfg.allowReanimated && life == 4)) continue;
 			if(!hostile) continue;
-			if(g_cfg.requireCombat && !actor->IsInCombat()) continue;
+			if(g_cfg.requireCombat && !listed && !actor->IsInCombat()) continue;
 
 			const float yaw = atan2f(dx, dy);
 			const float off = fabsf(WrapPi(yaw - facing));
@@ -466,8 +543,11 @@ namespace
 			}
 
 			// Histerese opcional: o alvo atual so e trocado se outro for claramente mais perto.
-			if(actor->formID == g_lastTargetId && g_cfg.switchMargin > 0.0f)
-				score *= (1.0f - g_cfg.switchMargin / 100.0f);
+			if(actor->formID == g_lastTargetId)
+			{
+				if(g_cfg.stickyTarget && g_active) score = -1.0f;		// sequencia de golpes: mantem o alvo enquanto for valido
+				else if(g_cfg.switchMargin > 0.0f) score *= (1.0f - g_cfg.switchMargin / 100.0f);
+			}
 
 			if(score < bestScore)
 			{
@@ -502,7 +582,6 @@ namespace
 	}
 
 	// ------------------------------------------------------------------ rotacao suave (thread)
-	volatile LONG	g_active	= 0;
 	volatile LONG	g_hasPitch	= 0;
 	volatile LONG	g_moveHeld	= 0;		// teclas de movimento carregadas (o regresso nao corre contra o TDM)
 	volatile DWORD	g_endTick	= 0;
@@ -522,10 +601,10 @@ namespace
 		return want;
 	}
 
-	void CameraYawCompensate(UInt8 * cs, float step, float camYaw0)
+	void CameraYawCompensate(UInt8 * cs, float step, float camYaw0, int mode)
 	{
 		if(!cs) return;
-		if(g_cfg.cameraMode == 3)
+		if(mode == 3)
 		{
 			// O jogo calcula camera = corpo + deslocamento a cada quadro. Tiramos ao deslocamento o
 			// mesmo giro dado ao corpo, e a propria conta do jogo deixa a camera parada.
@@ -535,8 +614,8 @@ namespace
 		}
 		float * y1 = (float *)(cs + 0x5C);
 		float * y2 = (float *)(cs + 0x60);
-		if(g_cfg.cameraMode == 1)		{ *y1 -= step; *y2 -= step; }
-		else if(g_cfg.cameraMode == 2)	{ *y1 = camYaw0; *y2 = camYaw0; }
+		if(mode == 1)		{ *y1 -= step; *y2 -= step; }
+		else if(mode == 2)	{ *y1 = camYaw0; *y2 = camYaw0; }
 	}
 
 	DWORD WINAPI TurnThread(LPVOID)
@@ -562,7 +641,14 @@ namespace
 			if(!player) { phase = 0; continue; }
 
 			// Pede ao Coeus para largar a rotacao do corpo enquanto giramos (expira em 500 ms).
-			const bool wantYield = g_cfg.coeusYield && g_coeusExternal && (g_active || phase == 2) && !g_lockActive;
+			const bool coeusProfile = InCoeusProfile();
+			const int  camMode = EffCameraMode();
+
+			// Lock-on ativo (e SoftTarget em pausa): larga tudo, sem regressar ao rumo antigo
+			// (era isso que brigava com o lock-on e agitava a camera).
+			if(g_lockActive && g_cfg.lockOnMode == 0) { phase = 0; g_active = 0; }
+
+			const bool wantYield = g_cfg.coeusYield && coeusProfile && g_coeusExternal && (g_active || phase == 2) && !g_lockActive;
 			if(wantYield)
 			{
 				if(!yielding || now - lastYield > 150)
@@ -583,7 +669,7 @@ namespace
 			}
 
 			// Camera: com o lock-on ativo (LockOnMode=1) so o corpo gira; a camera fica com o lock-on.
-			const bool wantCam = (g_cfg.cameraMode != 0) || (g_cfg.verticalMode & 2);
+			const bool wantCam = (camMode != 0) || (g_cfg.verticalMode & 2);
 			UInt8 * cs = (wantCam && !g_lockActive) ? ThirdPersonStatePtr() : NULL;
 			NiPoint3 & rot = Engine::Rotation(player);
 			const float maxRad = g_cfg.turnSpeedDeg * kPi / 180.0f;
@@ -605,7 +691,7 @@ namespace
 				// Guinada do corpo.
 				const float stepYaw = StepToward(rot.z, g_targetYaw, true, dt, maxRad);
 				rot.z = WrapPi(rot.z + stepYaw);
-				CameraYawCompensate(cs, stepYaw, camYaw0);
+				CameraYawCompensate(cs, stepYaw, camYaw0, camMode);
 
 				// Mira vertical (magia).
 				if(g_hasPitch && g_cfg.verticalMode)
@@ -638,7 +724,7 @@ namespace
 
 				const float stepYaw = StepToward(rot.z, homeYaw, true, dt, returnRad);
 				rot.z = WrapPi(rot.z + stepYaw);
-				CameraYawCompensate(cs, stepYaw, camYaw0);
+				CameraYawCompensate(cs, stepYaw, camYaw0, camMode);
 				bool done = fabsf(WrapPi(homeYaw - rot.z)) < 0.01f;
 
 				if(g_cfg.verticalMode & 1)
