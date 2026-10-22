@@ -19,7 +19,7 @@ int ocount
 int lang		; 0 = English, 1 = Portugues
 
 int Function GetVersion()
-	return 4
+	return 5
 EndFunction
 
 Function InitTables()
@@ -84,10 +84,9 @@ string[] Function MenuChoices(int menuId)
 		r[0] = T("Cone in front", "Cone à frente")
 		r[1] = T("Circle around (360)", "Círculo à volta (360)")
 	elseIf menuId == 7
-		r = new string[3]
-		r[0] = T("Automatic", "Automático")
-		r[1] = T("Normal (without TDM)", "Normal (sem TDM)")
-		r[2] = T("TDM (directional movement)", "TDM (movimento direcional)")
+		r = new string[2]
+		r[0] = T("Normal (without TDM / Unsheathed off)", "Normal (sem TDM / Unsheathed desligado)")
+		r[1] = T("TDM (Unsheathed on)", "TDM (Unsheathed ligado)")
 	elseIf menuId == 3
 		r = new string[4]
 		r[0] = T("Off", "Desligado")
@@ -107,9 +106,10 @@ string[] Function MenuChoices(int menuId)
 		r[2] = T("Tilt the camera", "Inclinar a câmera")
 		r[3] = T("Both", "Ambos")
 	else
-		r = new string[2]
+		r = new string[3]
 		r[0] = T("Pause SoftTarget", "Pausar o SoftTarget")
 		r[1] = T("Body only (camera untouched)", "Só o corpo (câmera intacta)")
+		r[2] = T("Pause + switch lock-on to nearest", "Pausar + trocar o lock-on para o mais próximo")
 	endIf
 	return r
 EndFunction
@@ -240,7 +240,7 @@ EndEvent
 
 string Function ProfileName(int v)
 	if v == 2
-		return T("TDM (directional movement)", "TDM (movimento direcional)")
+		return T("TDM (Unsheathed on)", "TDM (Unsheathed ligado)")
 	endIf
 	return T("Normal (without TDM)", "Normal (sem TDM)")
 EndFunction
@@ -281,11 +281,11 @@ Function PageGeneral()
 	AddEmptyOption()
 	AddToggleRow("Enabled", T("Enabled", "Ativado"), 1.0, T("Turns the whole mod on or off.", "Liga ou desliga o mod inteiro."))
 	AddMenuRow("Language", T("Menu language", "Idioma do menu"), 1, 0.0, T("Language of this menu. Page names update the next time you open the menu.", "Idioma deste menu. Os nomes das páginas mudam na próxima vez que abrir o menu."))
-	AddMenuRow("Profile", T("Profile", "Perfil"), 7, 0.0, T("Automatic: the TDM profile is used while Coeus directional movement is active (with EnableUnsheathed=0 that means only while weapons are sheathed); otherwise the normal profile. You can also force one of them.", "Automático: o perfil TDM é usado enquanto o movimento direcional do Coeus está ativo (com EnableUnsheathed=0 isso é só com as armas guardadas); senão o perfil normal. Também pode forçar um deles."))
+	AddMenuRow("ProfileMode", T("Profile", "Perfil"), 7, 1.0, T("Normal: no directional movement (TDM off, or Coeus with EnableUnsheathed=0, so weapons-drawn movement is vanilla). TDM: Coeus directional movement is active with weapons drawn (EnableUnsheathed=1). Pick the one that matches your Coeus setting.", "Normal: sem movimento direcional (TDM desligado, ou Coeus com EnableUnsheathed=0, então com armas na mão o movimento é o do jogo). TDM: o movimento direcional do Coeus está ativo com armas na mão (EnableUnsheathed=1). Escolha o que corresponde à sua configuração do Coeus."))
 	AddEmptyOption()
 	AddHeaderOption(T("Status", "Estado"))
 	AddEmptyOption()
-	AddStatusRow(T("Active profile", "Perfil ativo"), ProfileName(SoftTargetNative.Status(0)), T("The profile in use right now.", "O perfil em uso neste momento."))
+	AddStatusRow(T("Active profile", "Perfil ativo"), ProfileName(SoftTargetNative.Status(0)), T("The profile you chose above.", "O perfil escolhido acima."))
 	AddStatusRow(T("Lock-on active", "Lock-on ativo"), YesNo(SoftTargetNative.Status(3)), "")
 	AddStatusRow(T("Coeus found", "Coeus encontrado"), YesNo(SoftTargetNative.Status(2)), "")
 	AddStatusRow(T("LockOn.dll found", "LockOn.dll encontrada"), YesNo(SoftTargetNative.Status(1)), "")
@@ -334,8 +334,8 @@ Function PageBody()
 	AddSliderRow("Smoothing", T("Smoothing", "Suavização"), 0.0, 30.0, 0.5, 0.0, 1.0, 0, "{1}", T("0 = constant speed. Higher values slow down smoothly when arriving at the target. Try 8 to 15.", "0 = velocidade constante. Valores maiores abrandam suavemente ao chegar ao alvo. Experimente 8 a 15."))
 	AddSliderRow("UpdateMilliseconds", T("Update interval", "Intervalo de atualização"), 1.0, 30.0, 1.0, 8.0, 1.0, 1, "{0} ms", T("How often the turn is updated. Lower is smoother.", "De quanto em quanto tempo o giro é atualizado. Menos é mais fluido."))
 	AddEmptyOption()
-	int prof = SoftTargetNative.GetInt("Profile")
-	if prof == 0 || prof == 1
+	int prof = SoftTargetNative.GetInt("ProfileMode")
+	if prof == 0
 		AddHeaderOption(T("Normal profile (without TDM)", "Perfil normal (sem TDM)"))
 		AddEmptyOption()
 		AddSliderRow("MouseOverrideMs", T("Mouse takes over", "Rato assume o controlo"), 0.0, 10000.0, 500.0, 3000.0, 0.001, 1, "{1} s", T("When you move the mouse (or right stick), the body stops following the enemy for this long, so you can look around. Attacking does not cancel it. 0 = off.", "Quando mexe o rato (ou o stick direito), o corpo deixa de seguir o inimigo durante este tempo, para poder olhar à volta. Atacar não cancela. 0 = desligado."))
@@ -348,16 +348,16 @@ Function PageBody()
 EndFunction
 
 Function PageCamera()
-	int prof = SoftTargetNative.GetInt("Profile")
-	if prof == 0 || prof == 2
+	int prof = SoftTargetNative.GetInt("ProfileMode")
+	if prof == 1
 		AddHeaderOption(T("TDM profile (directional movement)", "Perfil TDM (movimento direcional)"))
 		AddEmptyOption()
-		AddMenuRow("CameraModeCoeus", T("Camera while turning", "Câmera durante o giro"), 4, 0.0, T("With TDM the camera is free, so 'Off' (do not touch the camera) is usually right.", "Com o TDM a câmera é livre, então 'Desligado' (não mexer na câmera) costuma ser o certo."))
-		AddSliderRow("AttackPulseMs", T("Turn while walking", "Virar enquanto anda"), 0.0, 1500.0, 50.0, 350.0, 0.001, 1, "{2} s", T("While you walk, the body belongs to TDM (movement follows the camera). Each attack turns it toward the enemy for this long. 0 = never turn while walking.", "Enquanto anda, o corpo é do TDM (o movimento segue a câmera). Cada ataque vira-o para o inimigo durante este tempo. 0 = nunca virar enquanto anda."))
-		AddToggleRow("CoeusYield", T("Lock-on style movement", "Movimento estilo lock-on"), 0.0, T("Asks Coeus to let go of the body, so walking becomes relative to the body (like a lock-on). The camera may follow the body. Not recommended.", "Pede ao Coeus para largar o corpo, então andar fica relativo ao corpo (como num lock-on). A câmera pode acompanhar o corpo. Não recomendado."))
+		AddToggleRow("CoeusYield", T("Face the target while moving", "Encarar o alvo enquanto anda"), 1.0, T("During the combat window Coeus lets go of the body: the character faces the enemy and walks relative to that facing (W = toward the enemy, S = backpedal, A/D = strafe) while the camera stays where you left it. When off, Coeus keeps control while you walk.", "Durante a janela de combate o Coeus larga o corpo: o personagem encara o inimigo e anda relativo a isso (W = para o inimigo, S = recuar, A/D = lateral) enquanto a câmera fica onde a deixou. Desligado, o Coeus mantém o controlo enquanto anda."))
 		AddEmptyOption()
+		AddMenuRow("CameraModeCoeus", T("Camera when not facing the target", "Câmera sem encarar o alvo"), 4, 0.0, T("Only used when 'Face the target while moving' is off. 'Off' (do not touch the camera) is usually right.", "Só é usado quando 'Encarar o alvo enquanto anda' está desligado. 'Desligado' (não mexer na câmera) costuma ser o certo."))
+		AddSliderRow("AttackPulseMs", T("Turn while walking", "Virar enquanto anda"), 0.0, 1500.0, 50.0, 350.0, 0.001, 1, "{2} s", T("Only when 'Face the target while moving' is off: each attack turns the walking body toward the enemy for this long. 0 = never.", "Só quando 'Encarar o alvo enquanto anda' está desligado: cada ataque vira o corpo em movimento para o inimigo durante este tempo. 0 = nunca."))
 	endIf
-	if prof == 0 || prof == 1
+	if prof == 0
 		AddHeaderOption(T("Normal profile (without TDM)", "Perfil normal (sem TDM)"))
 		AddEmptyOption()
 		AddMenuRow("CameraMode", T("Camera while turning", "Câmera durante o giro"), 4, 3.0, T("Keeps the camera still while the body turns. Offset is the recommended mode.", "Mantém a câmera parada enquanto o corpo vira. Deslocamento é o modo recomendado."))
@@ -366,6 +366,7 @@ Function PageCamera()
 	AddHeaderOption(T("Lock-on (Simple Lock-On / Coeus)", "Lock-on (Simple Lock-On / Coeus)"))
 	AddEmptyOption()
 	AddMenuRow("LockOnMode", T("While locked on", "Com o lock-on ativo"), 6, 0.0, T("Pause SoftTarget while the lock-on is active, or let it turn only the body without touching the camera.", "Pausar o SoftTarget enquanto o lock-on está ativo, ou deixá-lo virar só o corpo sem mexer na câmera."))
+	AddKeyRow("LockOnSwitchKey", T("Switch-target key", "Tecla de trocar alvo"), T("Key the mod presses to switch the lock-on target (mode 'switch to nearest'). 0 = the key LockOn.dll reports. If that key turns the lock-on off, the assist switches itself off.", "Tecla que o mod carrega para trocar o alvo do lock-on (modo 'trocar para o mais próximo'). 0 = a que a LockOn.dll indica. Se essa tecla desligar o lock-on, a ajuda desliga-se sozinha."))
 	AddKeyRow("LockOnKey", T("Lock-on key (fallback)", "Tecla do lock-on (reserva)"), T("Only used when the lock-on state cannot be read from LockOn.dll. Each press toggles the pause.", "Só é usada quando o estado do lock-on não pode ser lido da LockOn.dll. Cada toque liga ou desliga a pausa."))
 EndFunction
 
@@ -468,7 +469,7 @@ Event OnOptionMenuAccept(int a_option, int a_index)
 	if okey[i] == "Language"
 		lang = a_index
 		ForcePageReset()
-	elseIf okey[i] == "Profile"
+	elseIf okey[i] == "ProfileMode"
 		ForcePageReset()
 	else
 		SetMenuOptionValue(a_option, ChoiceText(omenu[i], a_index))
