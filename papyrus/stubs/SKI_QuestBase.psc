@@ -1,8 +1,7 @@
-Scriptname SKI_QuestBase extends Quest
-; Arquivo de apoio SO PARA COMPILAR (assinaturas do SkyUI). Nao e distribuido.
+Scriptname SKI_QuestBase extends Quest hidden
 
 int Function GetVersion()
-	return 0
+	return 1
 EndFunction
 
 Event OnVersionUpdate(int a_version)
