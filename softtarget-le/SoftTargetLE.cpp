@@ -658,6 +658,7 @@ namespace
 				if(done || g_moveHeld || (LONG)(now - returnStart) >= g_cfg.returnMaxMs) phase = 0;
 			}
 		}
+		return 0;
 	}
 
 	// ------------------------------------------------------------------ escolha + arranque
