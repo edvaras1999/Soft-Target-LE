@@ -25,7 +25,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.7.0 (sessao de combate, perfis TDM/normal, mouse livre, perfil do utilizador)"
+#define PLUGIN_VERSION_STR	"0.8.0 (perfis manuais, mouse corrigido, TDM de frente para o alvo, lock-on assistido)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -70,7 +70,7 @@ namespace
 		int		attackPulseMs;	// perfil TDM: ao atacar a andar, vira para o alvo durante este tempo
 		int		cameraMode;		// 0 = nao mexe; 1 = contra-rotacao; 2 = repoe angulo; 3 = deslocamento (recomendado)
 		int		lockOnKey;		// codigo da tecla do lock-on (reserva se a LockOn.dll nao existir)
-		int		lockOnMode;		// com lock-on ativo: 0 = pausa o SoftTarget; 1 = so corpo, sem mexer na camera
+		int		lockOnMode;		// com lock-on ativo: 0 = pausa o SoftTarget; 1 = so corpo, sem mexer na camera; 2 = pausa e troca o lock-on para o inimigo mais proximo
 		int		coeusYield;		// 1 = enquanto vira, pede ao Coeus para largar a rotacao do corpo
 		int		verticalMode;	// mira vertical: 0 = off, 1 = corpo, 2 = camera, 3 = ambas
 		float	aimHeight;		// altura do ponto de mira no alvo, acima dos pes
@@ -78,7 +78,8 @@ namespace
 		int		verticalInvert;	// 1 = inverte o sentido da inclinacao
 		float	verticalLimitDeg;// inclinacao maxima, em graus
 		int		language;		// idioma do menu: 0 = ingles, 1 = portugues
-		int		profile;		// 0 = automatico (Coeus se o movimento direcional esta ativo), 1 = sem TDM, 2 = Coeus (TDM)
+		int		profileMode;	// 0 = normal (sem TDM, ou Coeus com EnableUnsheathed=0), 1 = TDM (movimento direcional)
+		int		lockOnSwitchKey;// tecla para trocar de alvo no lock-on (0 = a que a LockOn.dll indica)
 		int		cameraModeCoeus;// camera no perfil Coeus (0 = nao mexe, recomendado)
 		int		stickyTarget;	// 1 = durante uma sequencia de golpes mantem o alvo enquanto for valido
 		int		allowReanimated;// 1 = aceita inimigos reanimados / sem estado de vida normal
@@ -115,14 +116,15 @@ namespace
 		{ "CameraMode",				'i', &g_cfg.cameraMode,			0.0f },
 		{ "LockOnKey",				'i', &g_cfg.lockOnKey,			0.0f },
 		{ "LockOnMode",				'i', &g_cfg.lockOnMode,			0.0f },
-		{ "CoeusYield",				'i', &g_cfg.coeusYield,			0.0f },
+		{ "CoeusYield",				'i', &g_cfg.coeusYield,			1.0f },
 		{ "VerticalMode",			'i', &g_cfg.verticalMode,		0.0f },
 		{ "AimHeight",				'f', &g_cfg.aimHeight,			100.0f },
 		{ "PlayerAimHeight",		'f', &g_cfg.playerAimHeight,	110.0f },
 		{ "VerticalInvert",			'i', &g_cfg.verticalInvert,		0.0f },
 		{ "VerticalLimitDegrees",	'f', &g_cfg.verticalLimitDeg,	45.0f },
 		{ "Language",				'i', &g_cfg.language,			0.0f },
-		{ "Profile",				'i', &g_cfg.profile,			0.0f },
+		{ "ProfileMode",			'i', &g_cfg.profileMode,		1.0f },
+		{ "LockOnSwitchKey",		'i', &g_cfg.lockOnSwitchKey,	0.0f },
 		{ "CameraModeCoeus",		'i', &g_cfg.cameraModeCoeus,	0.0f },
 		{ "StickyTarget",			'i', &g_cfg.stickyTarget,		1.0f },
 		{ "AllowReanimated",		'i', &g_cfg.allowReanimated,	1.0f },
@@ -263,11 +265,21 @@ namespace
 	FnVoidBool		g_sloIsLockOn	= NULL;		// LockOn.dll: SLO_IsLockOnActive
 	FnSetExternal	g_coeusExternal	= NULL;		// Coeus.dll: Coeus_SetExternalLockOnActive
 	FnVoidBool		g_coeusDirActive = NULL;	// Coeus.dll: Coeus_IsDirectionalMovementActive
+	typedef UInt32 (*FnVoidU32)(void);
+	typedef int    (*FnVoidInt)(void);
+	FnVoidU32		g_sloGetTarget	= NULL;		// LockOn.dll: SLO_GetTargetRefHandle
+	FnVoidInt		g_sloSwitchKey	= NULL;		// LockOn.dll: SLO_GetSwitchTargetKeyCode
+	volatile LONG	g_assistOff		= 0;		// a ajuda do lock-on desliga-se sozinha se a tecla desligar o lock-on
 
 	void ResolveExternal()
 	{
 		HMODULE h = GetModuleHandleA("LockOn.dll");
-		if(h) g_sloIsLockOn = (FnVoidBool)GetProcAddress(h, "SLO_IsLockOnActive");
+		if(h)
+		{
+			g_sloIsLockOn = (FnVoidBool)GetProcAddress(h, "SLO_IsLockOnActive");
+			g_sloGetTarget = (FnVoidU32)GetProcAddress(h, "SLO_GetTargetRefHandle");
+			g_sloSwitchKey = (FnVoidInt)GetProcAddress(h, "SLO_GetSwitchTargetKeyCode");
+		}
 		h = GetModuleHandleA("Coeus.dll");
 		if(h) g_coeusExternal = (FnSetExternal)GetProcAddress(h, "Coeus_SetExternalLockOnActive");
 		if(h) g_coeusDirActive = (FnVoidBool)GetProcAddress(h, "Coeus_IsDirectionalMovementActive");
@@ -291,6 +303,8 @@ namespace
 	bool			g_lockKeyState = false;
 	DWORD			g_lockNoEnemySince = 0;
 	volatile LONG	g_lockActive = 0;
+	// Com lock-on ativo o SoftTarget fica em pausa (modos 0 e 2); o modo 1 so vira o corpo.
+	bool LockPauses() { return g_lockActive && (g_cfg.lockOnMode == 0 || g_cfg.lockOnMode == 2); }
 
 	bool QueryLockOn()
 	{
@@ -302,18 +316,8 @@ namespace
 		return g_lockKeyState;
 	}
 
-	// Perfil efetivo: true = Coeus (TDM) ativo. Em automatico pergunta ao Coeus a cada chamada.
-	bool InCoeusProfile()
-	{
-		if(g_cfg.profile == 1) return false;
-		if(g_cfg.profile == 2) return true;
-		if(g_coeusDirActive)
-		{
-			__try { return g_coeusDirActive(); }
-			__except(EXCEPTION_EXECUTE_HANDLER) { g_coeusDirActive = NULL; return false; }
-		}
-		return false;
-	}
+	// Perfil escolhido no menu: true = TDM (movimento direcional do Coeus com armas na mao).
+	bool InCoeusProfile() { return g_cfg.profileMode == 1; }
 
 	int EffCameraMode() { return InCoeusProfile() ? g_cfg.cameraModeCoeus : g_cfg.cameraMode; }
 
@@ -479,6 +483,7 @@ namespace
 
 	// ------------------------------------------------------------------ escolha do alvo
 	UInt32 g_lastTargetId = 0;
+	volatile LONG	g_forceCircle = 0;	// 1 = ignora o cone (usado pela ajuda do lock-on)
 	volatile LONG	g_active	= 0;		// 1 = sessao de combate em curso (o corpo encara o alvo mais proximo)
 	volatile DWORD	g_overrideStart = 0;	// ultimo movimento do rato / stick direito (0 = nunca)
 	volatile DWORD	g_lastAttackTick = 0;	// ultimo toque de ataque
@@ -523,7 +528,7 @@ namespace
 		const NiPoint3 me		= Engine::Position(player);
 		const float facing		= Engine::Rotation(player).z;
 		const float halfCone	= (g_cfg.coneDeg * 0.5f) * kPi / 180.0f;
-		const bool  cone		= (g_cfg.shape == 0);
+		const bool  cone		= (g_cfg.shape == 0) && !g_forceCircle;
 		const float limitRad	= g_cfg.verticalLimitDeg * kPi / 180.0f;
 
 		UInt32 hostileIds[64], hostileHandles[64];
@@ -678,6 +683,56 @@ namespace
 		else if(mode == 2)	{ *y1 = camYaw0; *y2 = camYaw0; }
 	}
 
+	// ---- ajuda do lock-on: trocar para o inimigo mais proximo
+	UInt32 SafeCallU32(FnVoidU32 f)
+	{
+		__try { return f ? f() : 0; }
+		__except(EXCEPTION_EXECUTE_HANDLER) { return 0; }
+	}
+
+	int SafeCallInt(FnVoidInt f)
+	{
+		__try { return f ? f() : 0; }
+		__except(EXCEPTION_EXECUTE_HANDLER) { return 0; }
+	}
+
+	UInt32 SafeFormIdFromHandle(UInt32 handle)
+	{
+		__try
+		{
+			UInt32 h = handle;
+			TESObjectREFR * ref = NULL;
+			if(LookupREFRByHandle(&h, &ref) && ref)
+			{
+				const UInt32 id = ref->formID;
+				ref->handleRefObject.DecRefHandle();
+				return id;
+			}
+		}
+		__except(EXCEPTION_EXECUTE_HANDLER) { }
+		return 0;
+	}
+
+	bool GameHasFocus()
+	{
+		HWND w = GetForegroundWindow();
+		if(!w) return false;
+		DWORD pid = 0;
+		GetWindowThreadProcessId(w, &pid);
+		return pid == GetCurrentProcessId();
+	}
+
+	void TapKey(int scan)
+	{
+		INPUT in[2];
+		memset(in, 0, sizeof(in));
+		in[0].type = INPUT_KEYBOARD; in[0].ki.wScan = (WORD)scan; in[0].ki.dwFlags = KEYEVENTF_SCANCODE;
+		in[1].type = INPUT_KEYBOARD; in[1].ki.wScan = (WORD)scan; in[1].ki.dwFlags = KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP;
+		SendInput(1, &in[0], sizeof(INPUT));
+		Sleep(40);
+		SendInput(1, &in[1], sizeof(INPUT));
+	}
+
 	DWORD WINAPI TurnThread(LPVOID)
 	{
 		DWORD last = GetTickCount();
@@ -686,6 +741,9 @@ namespace
 		DWORD returnStart = 0, lastYield = 0, lastRetarget = 0, noTargetSince = 0;
 		bool  yielding = false;
 		int   lastProfile = -1;
+		DWORD lastAssist = 0, lastSwitch = 0, keyAt = 0;
+		int   attempts = 0;
+		bool  wasLock = false;
 
 		for(;;)
 		{
@@ -705,12 +763,43 @@ namespace
 			if((int)coeusProfile != lastProfile)
 			{
 				lastProfile = (int)coeusProfile;
-				_MESSAGE("profile: %s (profile option %d)", coeusProfile ? "TDM / directional movement" : "normal (no directional movement)", g_cfg.profile);
+				_MESSAGE("profile: %s", coeusProfile ? "TDM (directional movement)" : "normal (no directional movement)");
 			}
-			const int camMode = EffCameraMode();
 
 			// Lock-on ativo (SoftTarget em pausa): larga tudo, sem regressar ao rumo antigo.
-			if(g_lockActive && g_cfg.lockOnMode == 0) { phase = 0; g_active = 0; }
+			if(LockPauses()) { phase = 0; g_active = 0; }
+
+			// Lock-on assistido (LockOnMode=2): se o lock-on esta num inimigo que nao e o mais proximo,
+			// carrega na tecla de trocar alvo da LockOn.dll. Desliga-se sozinho se a tecla desligar o lock-on.
+			if(wasLock && !g_lockActive && keyAt && now - keyAt < 700 && !g_assistOff)
+			{
+				g_assistOff = 1;
+				_MESSAGE("lock-on assist: the switch key turned the lock-on OFF - assist disabled (set LockOnSwitchKey to another key or use LockOnMode 0/1)");
+			}
+			wasLock = g_lockActive != 0;
+			if(!g_lockActive) { attempts = 0; }
+			else if(g_cfg.lockOnMode == 2 && g_sloGetTarget && !g_assistOff && !g_cfg.logOnly && now - lastAssist >= 250)
+			{
+				lastAssist = now;
+				const UInt32 lh = SafeCallU32(g_sloGetTarget);
+				const UInt32 lockId = (lh && lh != 0xFFFFFFFF) ? SafeFormIdFromHandle(lh) : 0;
+				float ay = 0.0f, ap = 0.0f;
+				UInt32 nid = 0, nh = 0;
+				g_forceCircle = 1;
+				const bool ok = SafeFindTarget(player, &ay, &ap, &nid, &nh);
+				g_forceCircle = 0;
+				if(ok && lockId && nid != lockId && attempts < 3 && now - lastSwitch >= 900 && GameHasFocus())
+				{
+					int key = g_cfg.lockOnSwitchKey ? g_cfg.lockOnSwitchKey : SafeCallInt(g_sloSwitchKey);
+					if(key > 0 && key < 256)
+					{
+						_MESSAGE("lock-on assist: locked on %08X, nearest is %08X - pressing key %d (attempt %d)", lockId, nid, key, attempts + 1);
+						TapKey(key);
+						lastSwitch = now; keyAt = now; ++attempts;
+					}
+				}
+				else if(ok && nid == lockId) attempts = 0;
+			}
 
 			// Durante a sessao o alvo mais proximo e reavaliado aqui, mesmo sem carregar em nada.
 			if(g_active && !g_cfg.logOnly && now - lastRetarget >= (DWORD)g_cfg.retargetMs)
@@ -738,8 +827,8 @@ namespace
 			//  - sem TDM: depois de mexer o rato (ou o stick direito) o jogador manda na camera durante MouseOverrideMs;
 			//  - perfil TDM: enquanto anda, o corpo e do Coeus (andar relativo a camera); so ha um "pulso"
 			//    de AttackPulseMs depois de cada ataque.
-			const bool mouseOverride = !coeusProfile && g_cfg.mouseOverrideMs > 0 && g_overrideStart != 0 && (now - g_overrideStart) < (DWORD)g_cfg.mouseOverrideMs;
-			const bool moveRelease   = coeusProfile && g_moveHeld && (now - g_lastAttackTick) >= (DWORD)g_cfg.attackPulseMs;
+			const bool mouseOverride = (!coeusProfile || g_cfg.coeusYield) && g_cfg.mouseOverrideMs > 0 && g_overrideStart != 0 && (now - g_overrideStart) < (DWORD)g_cfg.mouseOverrideMs;
+			const bool moveRelease   = coeusProfile && !g_cfg.coeusYield && g_moveHeld && (now - g_lastAttackTick) >= (DWORD)g_cfg.attackPulseMs;
 			const bool suppress = mouseOverride || moveRelease;
 
 			// Pede ao Coeus para largar a rotacao do corpo (movimento tipo lock-on; opcional, so perfil TDM).
@@ -763,6 +852,8 @@ namespace
 				yielding = false;
 			}
 
+			// Perfil TDM a encarar o alvo (Coeus larga o corpo): a camera fica parada pela mesma contagem do perfil normal.
+			const int camMode = wantYield ? 3 : EffCameraMode();
 			const bool wantCam = (camMode != 0) || (g_cfg.verticalMode & 2);
 			UInt8 * cs = (wantCam && !g_lockActive) ? ThirdPersonStatePtr() : NULL;
 			NiPoint3 & rot = Engine::Rotation(player);
@@ -849,7 +940,7 @@ namespace
 	bool AcquireAndTurn(int windowMs, bool /*extend*/)
 	{
 		// Lock-on ativo: LockOnMode=0 deixa o SoftTarget em pausa.
-		if(g_lockActive && g_cfg.lockOnMode == 0) return false;
+		if(LockPauses()) return false;
 
 		if(g_active && !g_cfg.logOnly)
 		{
@@ -985,7 +1076,7 @@ namespace
 				}
 				else g_lockNoEnemySince = 0;
 			}
-			if(g_lockActive && g_cfg.lockOnMode == 0) g_active = 0;
+			if(LockPauses()) g_active = 0;
 
 			bool holdBtnSeen = false;
 			bool extraHeldNow = false;
@@ -995,7 +1086,7 @@ namespace
 				{
 					const SInt32 * w = (const SInt32 *)e;
 					if(g_cfg.probe && GetTickCount() - g_lastMouseLog > 700) { g_lastMouseLog = GetTickCount(); _MESSAGE("probe-mouse: %d %d %d", (int)w[4], (int)w[5], (int)w[6]); }
-					if(w[4] != 0 || w[5] != 0) NoteLook();
+					if(w[5] != 0 || w[6] != 0) NoteLook();		// w[4] e o nome do controlo (nunca zero); x, y estao em w[5], w[6]
 					continue;
 				}
 				if(e->eventType == InputEvent::kEventType_Thumbstick)
@@ -1027,7 +1118,7 @@ namespace
 						g_lockKeyState = !g_lockKeyState;
 						g_lockNoEnemySince = 0;
 						g_lockActive = g_lockKeyState ? 1 : 0;
-						if(g_lockActive && g_cfg.lockOnMode == 0) g_active = 0;
+						if(LockPauses()) g_active = 0;
 						_MESSAGE("lock-on key: lock-on assumed %s", g_lockKeyState ? "ON" : "OFF");
 					}
 
