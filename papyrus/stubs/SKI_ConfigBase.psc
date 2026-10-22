@@ -80,3 +80,8 @@ Function SetMenuDialogDefaultIndex(int a_value)
 EndFunction
 Function SetMenuDialogOptions(string[] a_options)
 EndFunction
+Function SetTextOptionValue(int a_option, string a_value, bool a_noUpdate = false)
+EndFunction
+bool Function ShowMessage(string a_message, bool a_withCancel = true, string a_acceptLabel = "$Accept", string a_cancelLabel = "$Cancel")
+	return true
+EndFunction
