@@ -2,32 +2,37 @@
 //
 // Ao carregar no botao de ataque (ou ao SEGURAR o botao de bloqueio), o plugin procura o inimigo
 // mais proximo (cone a frente ou circulo a volta) e vira o CORPO do personagem para ele, de forma
-// suave. Nao usa Papyrus. Todas as afinacoes estao no SoftTargetLE.ini, que e relido sozinho
-// quando e guardado (nao precisa de reiniciar o jogo).
+// suave. Nao usa scripts em loop. Todas as afinacoes estao no SoftTargetLE.ini, que e relido
+// sozinho quando e guardado e pode ser mudado pelo menu (MCM do SkyUI), por funcoes nativas.
 //
-// ESTADO: versao 0.4.0 (experimental). Novidades: o corpo volta ao rumo original depois do golpe,
-// o alvo e reavaliado durante todo o giro, mira vertical (magia) e mais diagnostico (Probe=1).
+// ESTADO: versao 0.5.0 (experimental). Novidades: funcoes para o menu, camera pelo deslocamento
+// (CameraMode=3), CoeusYield, detecao real do lock-on (LockOn.dll), botoes extras (ExtraTapKeys /
+// ExtraHoldKeys) e idioma do menu (Language).
 // Licenca GPL-3.0. A base de compilacao e os enderecos vem do FreeClimb LE (GPL-3.0).
 
 #include "skse/PluginAPI.h"
 #include "skse/skse_version.h"
 #include "skse/GameRTTI.h"
 #include "skse/GameCamera.h"
+#include "skse/PapyrusVM.h"
+#include "skse/PapyrusNativeFunctions.h"
 #include "Log.h"
 #include "Engine.h"
 
 #include <shlobj.h>
 #include <math.h>
 #include <string.h>
+#include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.4.0 (retorno ao rumo, retarget continuo, mira vertical)"
+#define PLUGIN_VERSION_STR	"0.5.0 (menu, camera por deslocamento, lock-on real, botoes extras)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
 
 static PluginHandle				g_pluginHandle	= kPluginHandle_Invalid;
 static SKSEMessagingInterface *	g_messaging		= NULL;
+static SKSEPapyrusInterface *	g_papyrus		= NULL;
 
 // O SKSE declara LookupREFRByHandle mas so a define em GameReferences.cpp, que nao compilamos.
 // Definimos aqui com o endereco da LE 1.9.32.0 (confirmado no FreeClimb LE).
@@ -43,33 +48,79 @@ namespace
 		int		enabled;		// 1 = ligado
 		int		logOnly;		// 1 = so escreve no log, nao vira o personagem
 		int		verbose;		// 1 = log detalhado
-		int		probe;			// 1 = diagnostico: escreve dados da camera/jogador/teclas no log (so leitura)
+		int		probe;			// 1 = diagnostico (so leitura)
 		int		requireCombat;	// 1 = so inimigos ja em combate
 		int		useHostileList;	// 1 = tambem aceita quem o jogo ja lista como hostil ao jogador
 		int		shape;			// 0 = cone a frente, 1 = circulo a volta (360 graus)
 		float	range;			// alcance maximo (140 = ~2 m)
 		float	coneDeg;		// angulo TOTAL do cone (so no modo cone)
 		float	maxHeightDiff;	// diferenca maxima de altura ate ao alvo (relevo)
-		float	switchMargin;	// % que um novo alvo tem de ser mais proximo para trocar (0 = troca logo)
+		float	switchMargin;	// % que um novo alvo tem de ser mais proximo para trocar
 		float	turnSpeedDeg;	// velocidade maxima de rotacao, graus por segundo
-		float	smoothing;		// 0 = velocidade constante; >0 = abranda ao chegar (maior = mais rapido)
-		int		updateMs;		// intervalo da rotacao, em ms (menor = mais fluido)
+		float	smoothing;		// 0 = velocidade constante; >0 = abranda ao chegar
+		int		updateMs;		// intervalo da rotacao, em ms
 		int		tapAssist;		// 1 = vira ao carregar no ataque
-		int		holdMode;		// bloqueio continuo: 0 = off, 1 = botao esquerdo (M2), 2 = botao direito, 3 = ambos
+		int		holdMode;		// bloqueio continuo: 0 = off, 1 = botao esquerdo (M2), 2 = direito (M1), 3 = ambos
 		int		retargetMs;		// de quanto em quanto tempo re-escolhe o alvo durante o giro
-		int		holdMs;			// quanto tempo a rotacao e mantida depois de um toque no ataque
-		int		returnToHeading;// 1 = depois do golpe o corpo volta ao rumo que tinha antes
+		int		holdMs;			// quanto tempo o corpo encara o alvo depois de um toque
+		int		returnToHeading;// 1 = depois do golpe o corpo volta ao rumo anterior
 		float	returnSpeedDeg;	// velocidade do regresso, graus por segundo
 		int		returnMaxMs;	// tempo maximo do regresso
-		int		cameraMode;		// 0 = nao mexe; 1 = contra-rotacao da camera; 2 = camera fica parada durante o giro
-		int		lockOnKey;		// codigo da tecla do lock-on (F = 33); 0 = desligado
-		int		verticalMode;	// mira vertical: 0 = off, 1 = inclinacao do corpo, 2 = inclinacao da camera, 3 = ambas
+		int		cameraMode;		// 0 = nao mexe; 1 = contra-rotacao; 2 = repoe angulo; 3 = deslocamento (recomendado)
+		int		lockOnKey;		// codigo da tecla do lock-on (reserva se a LockOn.dll nao existir)
+		int		lockOnMode;		// com lock-on ativo: 0 = pausa o SoftTarget; 1 = so corpo, sem mexer na camera
+		int		coeusYield;		// 1 = enquanto vira, pede ao Coeus para largar a rotacao do corpo
+		int		verticalMode;	// mira vertical: 0 = off, 1 = corpo, 2 = camera, 3 = ambas
 		float	aimHeight;		// altura do ponto de mira no alvo, acima dos pes
 		float	playerAimHeight;// altura de onde o jogador "mira", acima dos pes
-		int		verticalInvert;	// 1 = inverte o sentido da inclinacao (se subir em vez de descer)
+		int		verticalInvert;	// 1 = inverte o sentido da inclinacao
 		float	verticalLimitDeg;// inclinacao maxima, em graus
+		int		language;		// idioma do menu: 0 = ingles, 1 = portugues
 	};
 	Config g_cfg;
+
+	// Tabela de opcoes: usada para ler o .ini e pelas funcoes nativas do menu.
+	struct Opt { const char * key; char type; void * ptr; float def; };
+	Opt g_opts[] =
+	{
+		{ "Enabled",				'i', &g_cfg.enabled,			1.0f },
+		{ "LogOnly",				'i', &g_cfg.logOnly,			0.0f },
+		{ "Verbose",				'i', &g_cfg.verbose,			0.0f },
+		{ "Probe",					'i', &g_cfg.probe,				0.0f },
+		{ "RequireCombat",			'i', &g_cfg.requireCombat,		1.0f },
+		{ "UseHostileList",			'i', &g_cfg.useHostileList,		1.0f },
+		{ "Shape",					'i', &g_cfg.shape,				0.0f },
+		{ "Range",					'f', &g_cfg.range,				450.0f },
+		{ "ConeDegrees",			'f', &g_cfg.coneDeg,			140.0f },
+		{ "MaxHeightDifference",	'f', &g_cfg.maxHeightDiff,		600.0f },
+		{ "SwitchMarginPercent",	'f', &g_cfg.switchMargin,		0.0f },
+		{ "TurnSpeedDegPerSec",		'f', &g_cfg.turnSpeedDeg,		900.0f },
+		{ "Smoothing",				'f', &g_cfg.smoothing,			0.0f },
+		{ "UpdateMilliseconds",		'i', &g_cfg.updateMs,			8.0f },
+		{ "TapAssist",				'i', &g_cfg.tapAssist,			1.0f },
+		{ "HoldFaceButton",			'i', &g_cfg.holdMode,			3.0f },
+		{ "RetargetMilliseconds",	'i', &g_cfg.retargetMs,			80.0f },
+		{ "HoldMilliseconds",		'i', &g_cfg.holdMs,				3000.0f },
+		{ "ReturnToHeading",		'i', &g_cfg.returnToHeading,	1.0f },
+		{ "ReturnSpeedDegPerSec",	'f', &g_cfg.returnSpeedDeg,		360.0f },
+		{ "ReturnMaxMilliseconds",	'i', &g_cfg.returnMaxMs,		1200.0f },
+		{ "CameraMode",				'i', &g_cfg.cameraMode,			0.0f },
+		{ "LockOnKey",				'i', &g_cfg.lockOnKey,			0.0f },
+		{ "LockOnMode",				'i', &g_cfg.lockOnMode,			0.0f },
+		{ "CoeusYield",				'i', &g_cfg.coeusYield,			0.0f },
+		{ "VerticalMode",			'i', &g_cfg.verticalMode,		0.0f },
+		{ "AimHeight",				'f', &g_cfg.aimHeight,			100.0f },
+		{ "PlayerAimHeight",		'f', &g_cfg.playerAimHeight,	110.0f },
+		{ "VerticalInvert",			'i', &g_cfg.verticalInvert,		0.0f },
+		{ "VerticalLimitDegrees",	'f', &g_cfg.verticalLimitDeg,	45.0f },
+		{ "Language",				'i', &g_cfg.language,			0.0f },
+	};
+	const int kNumOpts = sizeof(g_opts) / sizeof(g_opts[0]);
+
+	// Teclas extra (codigos de teclado separados por virgula): toque e segurar.
+	const int kMaxKeys = 8;
+	int g_tapKeys[kMaxKeys];	int g_numTapKeys = 0;
+	int g_holdKeys[kMaxKeys];	int g_numHoldKeys = 0;
 
 	char		g_iniPath[MAX_PATH];
 	FILETIME	g_iniStamp;
@@ -82,7 +133,8 @@ namespace
 	}
 
 	// Procura o .ini ao lado da DLL (funciona com Mod Organizer 2 e Vortex); se nao houver, usa
-	// o caminho classico Data\SKSE\Plugins.
+	// o caminho classico Data\SKSE\Plugins. Se nenhum existir, guarda o caminho ao lado da DLL
+	// (e o menu cria o ficheiro ao gravar).
 	void ResolveIniPath()
 	{
 		g_iniPath[0] = 0;
@@ -124,54 +176,55 @@ namespace
 		return (int)(ReadFloat(key, (float)def) + (def < 0 ? -0.5f : 0.5f));
 	}
 
+	int ParseKeys(const char * key, int * out, int maxN)
+	{
+		char buf[128] = { 0 };
+		GetPrivateProfileStringA("SoftTarget", key, "", buf, sizeof(buf), g_iniPath);
+		int n = 0;
+		const char * p = buf;
+		while(*p && n < maxN)
+		{
+			while(*p == ' ' || *p == ',' || *p == ';') ++p;
+			if(!*p) break;
+			char * end = NULL;
+			const long v = strtol(p, &end, 10);
+			if(end == p) { ++p; continue; }
+			if(v > 0 && v < 512) out[n++] = (int)v;
+			p = end;
+		}
+		return n;
+	}
+
+	void RefreshIniStamp()
+	{
+		WIN32_FILE_ATTRIBUTE_DATA d;
+		if(g_iniPath[0] && GetFileAttributesExA(g_iniPath, GetFileExInfoStandard, &d)) g_iniStamp = d.ftLastWriteTime;
+	}
+
 	void LoadConfig()
 	{
 		const bool found = g_iniPath[0] && FileExists(g_iniPath);
-		if(found)
-		{
-			WIN32_FILE_ATTRIBUTE_DATA d;
-			if(GetFileAttributesExA(g_iniPath, GetFileExInfoStandard, &d)) g_iniStamp = d.ftLastWriteTime;
-		}
+		if(found) RefreshIniStamp();
 
-		g_cfg.enabled		= ReadInt("Enabled", 1);
-		g_cfg.logOnly		= ReadInt("LogOnly", 0);
-		g_cfg.verbose		= ReadInt("Verbose", 0);
-		g_cfg.probe			= ReadInt("Probe", 0);
-		g_cfg.requireCombat	= ReadInt("RequireCombat", 1);
-		g_cfg.useHostileList = ReadInt("UseHostileList", 1);
-		g_cfg.shape			= ReadInt("Shape", 0);
-		g_cfg.range			= ReadFloat("Range", 450.0f);
-		g_cfg.coneDeg		= ReadFloat("ConeDegrees", 140.0f);
-		g_cfg.maxHeightDiff	= ReadFloat("MaxHeightDifference", 600.0f);
-		g_cfg.switchMargin	= ReadFloat("SwitchMarginPercent", 0.0f);
-		g_cfg.turnSpeedDeg	= ReadFloat("TurnSpeedDegPerSec", 900.0f);
-		g_cfg.smoothing		= ReadFloat("Smoothing", 0.0f);
-		g_cfg.updateMs		= ReadInt("UpdateMilliseconds", 8);
-		g_cfg.tapAssist		= ReadInt("TapAssist", 1);
-		g_cfg.holdMode		= ReadInt("HoldFaceButton", 0);
-		g_cfg.retargetMs	= ReadInt("RetargetMilliseconds", ReadInt("HoldRetargetMilliseconds", 80));
-		g_cfg.holdMs		= ReadInt("HoldMilliseconds", 400);
-		g_cfg.returnToHeading = ReadInt("ReturnToHeading", 1);
-		g_cfg.returnSpeedDeg = ReadFloat("ReturnSpeedDegPerSec", 360.0f);
-		g_cfg.returnMaxMs	= ReadInt("ReturnMaxMilliseconds", 1200);
-		g_cfg.cameraMode	= ReadInt("CameraMode", 0);
-		g_cfg.lockOnKey		= ReadInt("LockOnKey", 0);
-		g_cfg.verticalMode	= ReadInt("VerticalMode", 0);
-		g_cfg.aimHeight		= ReadFloat("AimHeight", 100.0f);
-		g_cfg.playerAimHeight = ReadFloat("PlayerAimHeight", 110.0f);
-		g_cfg.verticalInvert = ReadInt("VerticalInvert", 0);
-		g_cfg.verticalLimitDeg = ReadFloat("VerticalLimitDegrees", 45.0f);
+		for(int i = 0; i < kNumOpts; ++i)
+		{
+			if(g_opts[i].type == 'i') *(int *)g_opts[i].ptr = ReadInt(g_opts[i].key, (int)g_opts[i].def);
+			else					  *(float *)g_opts[i].ptr = ReadFloat(g_opts[i].key, g_opts[i].def);
+		}
+		g_numTapKeys  = ParseKeys("ExtraTapKeys",  g_tapKeys,  kMaxKeys);
+		g_numHoldKeys = ParseKeys("ExtraHoldKeys", g_holdKeys, kMaxKeys);
 
 		if(g_cfg.updateMs < 1)		g_cfg.updateMs = 1;
 		if(g_cfg.updateMs > 50)		g_cfg.updateMs = 50;
 		if(g_cfg.retargetMs < 16)	g_cfg.retargetMs = 16;
 
-		_MESSAGE("config (%s%s): enabled=%d logOnly=%d shape=%s range=%.0f cone=%.0f turn=%.0f smooth=%.1f update=%dms tap=%d hold=%d retarget=%dms combat=%d camera=%d lockKey=%d hostileList=%d return=%d vertical=%d switchMargin=%.0f",
+		_MESSAGE("config (%s%s): enabled=%d logOnly=%d shape=%s range=%.0f cone=%.0f turn=%.0f smooth=%.1f update=%dms tap=%d hold=%d retarget=%dms holdMs=%d combat=%d camera=%d lockKey=%d lockMode=%d yield=%d hostileList=%d return=%d vertical=%d switchMargin=%.0f tapKeys=%d holdKeys=%d lang=%d",
 				 found ? "ini: " : "NO ini found, defaults; looked for: ", g_iniPath[0] ? g_iniPath : PLUGIN_INI_NAME,
 				 g_cfg.enabled, g_cfg.logOnly, g_cfg.shape ? "circle" : "cone", g_cfg.range, g_cfg.coneDeg,
 				 g_cfg.turnSpeedDeg, g_cfg.smoothing, g_cfg.updateMs, g_cfg.tapAssist, g_cfg.holdMode,
-				 g_cfg.retargetMs, g_cfg.requireCombat, g_cfg.cameraMode, g_cfg.lockOnKey, g_cfg.useHostileList,
-				 g_cfg.returnToHeading, g_cfg.verticalMode, g_cfg.switchMargin);
+				 g_cfg.retargetMs, g_cfg.holdMs, g_cfg.requireCombat, g_cfg.cameraMode, g_cfg.lockOnKey, g_cfg.lockOnMode,
+				 g_cfg.coeusYield, g_cfg.useHostileList, g_cfg.returnToHeading, g_cfg.verticalMode, g_cfg.switchMargin,
+				 g_numTapKeys, g_numHoldKeys, g_cfg.language);
 	}
 
 	// Relê o .ini se ele mudou (verifica no maximo uma vez por segundo).
@@ -191,6 +244,87 @@ namespace
 		}
 	}
 
+	// ------------------------------------------------------------------ funcoes nativas (menu)
+	const Opt * FindOpt(const char * key)
+	{
+		if(!key) return NULL;
+		for(int i = 0; i < kNumOpts; ++i)
+			if(_stricmp(g_opts[i].key, key) == 0) return &g_opts[i];
+		return NULL;
+	}
+
+	float OptValue(const Opt * o)
+	{
+		return (o->type == 'i') ? (float)*(int *)o->ptr : *(float *)o->ptr;
+	}
+
+	void SetOpt(const char * key, float value)
+	{
+		const Opt * o = FindOpt(key);
+		if(!o) { _MESSAGE("menu: unknown option '%s'", key ? key : "(null)"); return; }
+
+		char buf[48];
+		if(o->type == 'i')
+		{
+			const int v = (int)(value + (value < 0 ? -0.5f : 0.5f));
+			*(int *)o->ptr = v;
+			_snprintf_s(buf, sizeof(buf), _TRUNCATE, "%d", v);
+		}
+		else
+		{
+			*(float *)o->ptr = value;
+			_snprintf_s(buf, sizeof(buf), _TRUNCATE, "%.3f", value);
+		}
+
+		if(g_cfg.updateMs < 1)		g_cfg.updateMs = 1;
+		if(g_cfg.updateMs > 50)		g_cfg.updateMs = 50;
+		if(g_cfg.retargetMs < 16)	g_cfg.retargetMs = 16;
+
+		if(g_iniPath[0])
+		{
+			WritePrivateProfileStringA("SoftTarget", o->key, buf, g_iniPath);
+			RefreshIniStamp();		// para nao reler o que acabamos de gravar
+		}
+	}
+
+	bool	N_GetBool(StaticFunctionTag *, BSFixedString key)	{ const Opt * o = FindOpt(key.data); return o ? (OptValue(o) != 0.0f) : false; }
+	SInt32	N_GetInt(StaticFunctionTag *, BSFixedString key)	{ const Opt * o = FindOpt(key.data); return o ? (SInt32)OptValue(o) : 0; }
+	float	N_GetFloat(StaticFunctionTag *, BSFixedString key)	{ const Opt * o = FindOpt(key.data); return o ? OptValue(o) : 0.0f; }
+	void	N_SetBool(StaticFunctionTag *, BSFixedString key, bool value)		{ SetOpt(key.data, value ? 1.0f : 0.0f); }
+	void	N_SetInt(StaticFunctionTag *, BSFixedString key, SInt32 value)		{ SetOpt(key.data, (float)value); }
+	void	N_SetFloat(StaticFunctionTag *, BSFixedString key, float value)		{ SetOpt(key.data, value); }
+	void	N_Reload(StaticFunctionTag *)										{ LoadConfig(); }
+
+	bool RegisterPapyrus(VMClassRegistry * registry)
+	{
+		registry->RegisterFunction(new NativeFunction1 <StaticFunctionTag, bool, BSFixedString>("GetBool", "SoftTargetNative", N_GetBool, registry));
+		registry->RegisterFunction(new NativeFunction1 <StaticFunctionTag, SInt32, BSFixedString>("GetInt", "SoftTargetNative", N_GetInt, registry));
+		registry->RegisterFunction(new NativeFunction1 <StaticFunctionTag, float, BSFixedString>("GetFloat", "SoftTargetNative", N_GetFloat, registry));
+		registry->RegisterFunction(new NativeFunction2 <StaticFunctionTag, void, BSFixedString, bool>("SetBool", "SoftTargetNative", N_SetBool, registry));
+		registry->RegisterFunction(new NativeFunction2 <StaticFunctionTag, void, BSFixedString, SInt32>("SetInt", "SoftTargetNative", N_SetInt, registry));
+		registry->RegisterFunction(new NativeFunction2 <StaticFunctionTag, void, BSFixedString, float>("SetFloat", "SoftTargetNative", N_SetFloat, registry));
+		registry->RegisterFunction(new NativeFunction0 <StaticFunctionTag, void>("Reload", "SoftTargetNative", N_Reload, registry));
+		_MESSAGE("papyrus functions registered (SoftTargetNative)");
+		return true;
+	}
+
+	// ------------------------------------------------------------------ DLLs opcionais (Coeus, LockOn)
+	typedef bool (*FnVoidBool)(void);
+	typedef void (*FnSetExternal)(bool active, UInt32 handle);
+
+	FnVoidBool		g_sloIsLockOn	= NULL;		// LockOn.dll: SLO_IsLockOnActive
+	FnSetExternal	g_coeusExternal	= NULL;		// Coeus.dll: Coeus_SetExternalLockOnActive
+
+	void ResolveExternal()
+	{
+		HMODULE h = GetModuleHandleA("LockOn.dll");
+		if(h) g_sloIsLockOn = (FnVoidBool)GetProcAddress(h, "SLO_IsLockOnActive");
+		h = GetModuleHandleA("Coeus.dll");
+		if(h) g_coeusExternal = (FnSetExternal)GetProcAddress(h, "Coeus_SetExternalLockOnActive");
+		_MESSAGE("external: LockOn.dll lock-on query %s, Coeus.dll external lock %s",
+				 g_sloIsLockOn ? "FOUND" : "not found (F key fallback)", g_coeusExternal ? "FOUND" : "not found");
+	}
+
 	// ------------------------------------------------------------------ matematica de angulos
 	// No Skyrim a rotacao Z (guinada) e medida a partir de +Y, no sentido horario:
 	// a direcao (dx, dy) corresponde a atan2(dx, dy).
@@ -201,13 +335,28 @@ namespace
 		return a;
 	}
 
+	// ------------------------------------------------------------------ lock-on
+	// Estado real vindo da LockOn.dll, se existir; senao, o ultimo toque na tecla LockOnKey.
+	bool			g_lockKeyState = false;
+	DWORD			g_lockNoEnemySince = 0;
+	volatile LONG	g_lockActive = 0;
+
+	bool QueryLockOn()
+	{
+		if(g_sloIsLockOn)
+		{
+			__try { return g_sloIsLockOn(); }
+			__except(EXCEPTION_EXECUTE_HANDLER) { g_sloIsLockOn = NULL; return false; }
+		}
+		return g_lockKeyState;
+	}
+
 	// ------------------------------------------------------------------ escolha do alvo
 	UInt32 g_lastTargetId = 0;
 
 	// Inimigos que o proprio jogo ja tem em combate com o jogador (PlayerCharacter::hostileHandles,
-	// offset 0x630: ponteiro + capacidade + tamanho). Ajuda com reanimados e invocados, para os
-	// quais a pergunta "e hostil?" as vezes responde que nao.
-	int CollectHostileIds(PlayerCharacter * player, UInt32 * ids, int maxIds)
+	// offset 0x630: ponteiro + capacidade + tamanho). Ajuda com reanimados e invocados.
+	int CollectHostileIds(PlayerCharacter * player, UInt32 * ids, UInt32 * handles, int maxIds)
 	{
 		const UInt32 * raw = (const UInt32 *)((UInt8 *)player + 0x630);
 		const UInt32 * data = (const UInt32 *)raw[0];
@@ -220,10 +369,13 @@ namespace
 		{
 			UInt32 handle = data[i];
 			if(!handle) continue;
+			UInt32 h = handle;
 			TESObjectREFR * ref = NULL;
-			if(LookupREFRByHandle(&handle, &ref) && ref)
+			if(LookupREFRByHandle(&h, &ref) && ref)
 			{
-				ids[n++] = ref->formID;
+				ids[n] = ref->formID;
+				if(handles) handles[n] = handle;
+				++n;
 				ref->handleRefObject.DecRefHandle();
 			}
 		}
@@ -232,9 +384,9 @@ namespace
 
 	DWORD g_lastActorLog = 0;
 
-	// Devolve true se encontrou um alvo; escreve a guinada, a inclinacao (positiva = para cima)
-	// e o formID.
-	bool FindTarget(Actor * player, float * outYaw, float * outPitchUp, UInt32 * outId)
+	// Devolve true se encontrou um alvo; escreve a guinada, a inclinacao (positiva = para cima),
+	// o formID e o handle (0 se o jogo nao o lista).
+	bool FindTarget(Actor * player, float * outYaw, float * outPitchUp, UInt32 * outId, UInt32 * outHandle)
 	{
 		TESObjectCELL * cell = Engine::ParentCell(player);
 		if(!cell) return false;
@@ -245,8 +397,8 @@ namespace
 		const bool  cone		= (g_cfg.shape == 0);
 		const float limitRad	= g_cfg.verticalLimitDeg * kPi / 180.0f;
 
-		UInt32 hostileIds[64];
-		const int hostileCount = g_cfg.useHostileList ? CollectHostileIds((PlayerCharacter *)player, hostileIds, 64) : 0;
+		UInt32 hostileIds[64], hostileHandles[64];
+		const int hostileCount = CollectHostileIds((PlayerCharacter *)player, hostileIds, hostileHandles, 64);
 
 		bool dbg = false;
 		int dbgLines = 0;
@@ -256,8 +408,7 @@ namespace
 		bool found = false;
 
 		// A lista de referencias da celula e cell->objectList (GameForms.h do SKSE 1.7.3, offset 0x4C):
-		// ponteiro para os dados + dois contadores (capacidade e tamanho). Le-se em bruto e usa-se o
-		// MENOR dos dois contadores, que e sempre o tamanho, qualquer que seja a ordem deles.
+		// ponteiro para os dados + dois contadores. Usa-se o MENOR dos dois, que e sempre o tamanho.
 		const UInt32 * raw = (const UInt32 *)&cell->objectList;
 		TESObjectREFR ** items = (TESObjectREFR **)raw[0];
 		UInt32 count = (raw[1] < raw[2]) ? raw[1] : raw[2];
@@ -282,8 +433,10 @@ namespace
 
 			const UInt32 life = Engine::LifeState(actor);
 
-			bool listed = false;
-			for(int j = 0; j < hostileCount; ++j) if(hostileIds[j] == actor->formID) { listed = true; break; }
+			int listedAt = -1;
+			if(g_cfg.useHostileList)
+				for(int j = 0; j < hostileCount; ++j) if(hostileIds[j] == actor->formID) { listedAt = j; break; }
+			const bool listed = (listedAt >= 0);
 
 			// Hostil ao jogador: funcao do proprio jogo OU presente na lista de hostis do jogador.
 			const bool hostile = listed || CALL_MEMBER_FN(actor, IsHostileToActor)(player);
@@ -305,7 +458,6 @@ namespace
 			if(cone)
 			{
 				if(off > halfCone) continue;
-				// Mais perto e mais a frente = melhor. O desvio angular pesa como distancia extra.
 				score = dist * (1.0f + off / (kPi * 0.5f));
 			}
 			else
@@ -322,6 +474,7 @@ namespace
 				bestScore = score;
 				*outYaw = yaw;
 				*outId = actor->formID;
+				*outHandle = (listedAt >= 0) ? hostileHandles[listedAt] : 0;
 
 				const float aimZ = (pos.z + g_cfg.aimHeight) - (me.z + g_cfg.playerAimHeight);
 				float up = atan2f(aimZ, dist > 1.0f ? dist : 1.0f);
@@ -335,9 +488,9 @@ namespace
 		return found;
 	}
 
-	// ------------------------------------------------------------------ camera (experimental)
-	// No log, em terceira pessoa (estado 8 ou 9): guinada da camera em 0x5C e 0x60, inclinacao
-	// em 0x54 e 0x58 do estado da camera. Com arma na mao a guinada acompanha o corpo.
+	// ------------------------------------------------------------------ camera
+	// Em terceira pessoa (estado 8 ou 9): guinada da camera em 0x5C e 0x60, inclinacao em 0x54 e 0x58
+	// e o "deslocamento" camera-corpo em 0xAC (camera = corpo + deslocamento; confirmado nos logs).
 	UInt8 * ThirdPersonStatePtr()
 	{
 		PlayerCamera * cam = PlayerCamera::GetSingleton();
@@ -355,6 +508,7 @@ namespace
 	volatile DWORD	g_endTick	= 0;
 	volatile float	g_targetYaw	= 0.0f;
 	volatile float	g_targetPitchUp = 0.0f;
+	volatile LONG	g_targetHandle = 0;
 
 	// Passo (com sinal) para aproximar 'cur' de 'target', com velocidade maxima e suavizacao.
 	float StepToward(float cur, float target, bool wrap, float dt, float maxSpeedRad)
@@ -371,6 +525,14 @@ namespace
 	void CameraYawCompensate(UInt8 * cs, float step, float camYaw0)
 	{
 		if(!cs) return;
+		if(g_cfg.cameraMode == 3)
+		{
+			// O jogo calcula camera = corpo + deslocamento a cada quadro. Tiramos ao deslocamento o
+			// mesmo giro dado ao corpo, e a propria conta do jogo deixa a camera parada.
+			float * off = (float *)(cs + 0xAC);
+			*off = WrapPi(*off - step);
+			return;
+		}
 		float * y1 = (float *)(cs + 0x5C);
 		float * y2 = (float *)(cs + 0x60);
 		if(g_cfg.cameraMode == 1)		{ *y1 -= step; *y2 -= step; }
@@ -383,6 +545,8 @@ namespace
 		int   phase = 0;					// 0 = parado, 1 = a virar para o alvo, 2 = a regressar ao rumo original
 		float homeYaw = 0.0f, homePitch = 0.0f, camYaw0 = 0.0f, camPitch0 = 0.0f;
 		DWORD returnStart = 0;
+		bool  yielding = false;
+		DWORD lastYield = 0;
 
 		for(;;)
 		{
@@ -397,8 +561,30 @@ namespace
 			PlayerCharacter * player = Engine::Player();
 			if(!player) { phase = 0; continue; }
 
+			// Pede ao Coeus para largar a rotacao do corpo enquanto giramos (expira em 500 ms).
+			const bool wantYield = g_cfg.coeusYield && g_coeusExternal && (g_active || phase == 2) && !g_lockActive;
+			if(wantYield)
+			{
+				if(!yielding || now - lastYield > 150)
+				{
+					__try { g_coeusExternal(true, (UInt32)g_targetHandle); }
+					__except(EXCEPTION_EXECUTE_HANDLER) { g_coeusExternal = NULL; }
+					yielding = true; lastYield = now;
+				}
+			}
+			else if(yielding)
+			{
+				if(g_coeusExternal)
+				{
+					__try { g_coeusExternal(false, 0); }
+					__except(EXCEPTION_EXECUTE_HANDLER) { g_coeusExternal = NULL; }
+				}
+				yielding = false;
+			}
+
+			// Camera: com o lock-on ativo (LockOnMode=1) so o corpo gira; a camera fica com o lock-on.
 			const bool wantCam = (g_cfg.cameraMode != 0) || (g_cfg.verticalMode & 2);
-			UInt8 * cs = wantCam ? ThirdPersonStatePtr() : NULL;
+			UInt8 * cs = (wantCam && !g_lockActive) ? ThirdPersonStatePtr() : NULL;
 			NiPoint3 & rot = Engine::Rotation(player);
 			const float maxRad = g_cfg.turnSpeedDeg * kPi / 180.0f;
 			const float limitRad = g_cfg.verticalLimitDeg * kPi / 180.0f;
@@ -475,23 +661,19 @@ namespace
 	}
 
 	// ------------------------------------------------------------------ escolha + arranque
-	// Lock-on (Simple Lock-On / Coeus): o plugin nao sabe se o lock esta ativo, entao acompanha a
-	// tecla configurada em LockOnKey: cada toque liga/desliga. Enquanto "travado", fica em pausa.
-	bool	g_lockOn = false;
-	DWORD	g_lockNoEnemySince = 0;
-
 	// Escolhe o alvo. Com 'extend' o giro e mantido durante 'windowMs'; sem 'extend' so se atualiza
 	// o alvo de um giro que ja esta em curso.
 	bool AcquireAndTurn(int windowMs, bool extend)
 	{
-		if(g_lockOn) return false;
+		// Lock-on ativo: LockOnMode=0 deixa o SoftTarget em pausa.
+		if(g_lockActive && g_cfg.lockOnMode == 0) return false;
 
 		PlayerCharacter * player = Engine::Player();
 		if(!player) return false;
 
 		float yaw = 0.0f, pitchUp = 0.0f;
-		UInt32 id = 0;
-		if(!FindTarget(player, &yaw, &pitchUp, &id)) return false;
+		UInt32 id = 0, handle = 0;
+		if(!FindTarget(player, &yaw, &pitchUp, &id, &handle)) return false;
 
 		if(g_cfg.verbose || id != g_lastTargetId)
 			_MESSAGE("target: formID %08X, yaw %.0f deg, pitch %.0f deg%s", id, yaw * 180.0f / kPi, pitchUp * 180.0f / kPi, g_cfg.logOnly ? " (LogOnly)" : "");
@@ -501,6 +683,7 @@ namespace
 
 		g_targetYaw = yaw;
 		g_targetPitchUp = pitchUp;
+		g_targetHandle = (LONG)handle;
 		g_hasPitch = g_cfg.verticalMode ? 1 : 0;
 		if(extend || !g_active) g_endTick = GetTickCount() + (DWORD)windowMs;
 		g_active = 1;
@@ -508,8 +691,6 @@ namespace
 	}
 
 	// ------------------------------------------------------------------ diagnostico (so leitura)
-	// Com Probe=1 escreve no log, de meio em meio segundo: estado da camera, rotacao da camera e do
-	// jogador, alvo do jogo e alvo da mira.
 	bool SafeReadWords(const void * src, UInt32 * dst, int count)
 	{
 		__try
@@ -535,16 +716,12 @@ namespace
 		PlayerCamera * cam = PlayerCamera::GetSingleton();
 		if(!player || !cam) return;
 
-		UInt32 crosshair = 0;
-		CrosshairRefHandleHolder * ch = CrosshairRefHandleHolder::GetSingleton();
-		if(ch) crosshair = ch->CrosshairRefHandle();
-
 		const NiPoint3 rot = Engine::Rotation(player);
 		TESCameraState * st = cam->cameraState;
 
-		_MESSAGE("probe: state=%u camRotZ=%.3f camRotX=%.3f zoom=%.2f | player rotZ=%.3f rotX=%.3f targetHandle=%08X crosshair=%08X",
+		_MESSAGE("probe: state=%u camRotZ=%.3f camRotX=%.3f zoom=%.2f | player rotZ=%.3f rotX=%.3f lockActive=%d",
 				 st ? (unsigned)st->stateId : 0xFFFFu, cam->rotZ, cam->rotX, cam->zoom,
-				 rot.z, rot.x, (unsigned)player->targetHandle, (unsigned)crosshair);
+				 rot.z, rot.x, (int)g_lockActive);
 
 		if(st)
 		{
@@ -565,10 +742,16 @@ namespace
 	}
 
 	// ------------------------------------------------------------------ botoes
-	bool	g_holdLeft = false, g_holdRight = false;
+	bool	g_holdLeft = false, g_holdRight = false, g_holdExtra = false;
 	bool	g_kFwd = false, g_kBack = false, g_kLeft = false, g_kRight = false;
 	DWORD	g_lastHoldEvent = 0;
 	DWORD	g_lastScan = 0;
+
+	bool InList(const int * list, int n, int code)
+	{
+		for(int i = 0; i < n; ++i) if(list[i] == code) return true;
+		return false;
+	}
 
 	// Bloqueio continuo: re-escolhe o alvo de tempos a tempos enquanto o botao esta seguro.
 	void HoldTick()
@@ -603,20 +786,24 @@ namespace
 			MaybeReloadConfig();
 			if(g_cfg.probe) ProbeTick();
 
-			// O lock-on desliga-se sozinho quando ja nao ha inimigos em combate (2 s seguidos).
-			if(g_lockOn)
+			// Estado do lock-on (real, pela LockOn.dll, ou estimado pela tecla).
+			g_lockActive = QueryLockOn() ? 1 : 0;
+			if(g_lockActive && !g_sloIsLockOn)
 			{
+				// Sem a LockOn.dll: desliga-se sozinho quando ja nao ha inimigos em combate (2 s seguidos).
 				PlayerCharacter * p = Engine::Player();
-				UInt32 tmp[8];
-				if(p && CollectHostileIds(p, tmp, 8) == 0)
+				UInt32 ids[8];
+				if(p && CollectHostileIds(p, ids, NULL, 8) == 0)
 				{
 					if(!g_lockNoEnemySince) g_lockNoEnemySince = GetTickCount();
-					else if(GetTickCount() - g_lockNoEnemySince > 2000) { g_lockOn = false; g_lockNoEnemySince = 0; _MESSAGE("lock-on assumed OFF (no enemies in combat)"); }
+					else if(GetTickCount() - g_lockNoEnemySince > 2000) { g_lockKeyState = false; g_lockActive = 0; g_lockNoEnemySince = 0; _MESSAGE("lock-on assumed OFF (no enemies in combat)"); }
 				}
 				else g_lockNoEnemySince = 0;
 			}
+			if(g_lockActive && g_cfg.lockOnMode == 0) g_active = 0;
 
 			bool holdBtnSeen = false;
+			bool extraHeldNow = false;
 			for(InputEvent * e = *events; e; e = e->next)
 			{
 				if(e->eventType != InputEvent::kEventType_Button) continue;
@@ -628,17 +815,32 @@ namespace
 
 				const BSFixedString * control = button->GetControlID();
 
-				// Diagnostico: regista cada toque de tecla (para descobrir o codigo da tecla do lock-on).
+				// Diagnostico: regista cada toque de tecla (para descobrir codigos de tecla).
 				if(g_cfg.probe && pressedNow)
 					_MESSAGE("probe-key: device=%u code=%u control=%s", (unsigned)e->deviceType, (unsigned)button->keyMask, (control && control->data) ? control->data : "-");
 
-				// Tecla do lock-on: cada toque liga/desliga o estado "travado".
-				if(g_cfg.lockOnKey && pressedNow && e->deviceType == kDeviceType_Keyboard && button->keyMask == (UInt32)g_cfg.lockOnKey)
+				if(e->deviceType == kDeviceType_Keyboard)
 				{
-					g_lockOn = !g_lockOn;
-					g_lockNoEnemySince = 0;
-					if(g_lockOn) g_active = 0;
-					_MESSAGE("lock-on key: assist %s", g_lockOn ? "PAUSED (lock-on assumed ON)" : "RESUMED (lock-on assumed OFF)");
+					const int code = (int)button->keyMask;
+
+					// Tecla de reserva do lock-on (so quando nao ha LockOn.dll): cada toque liga/desliga.
+					if(g_cfg.lockOnKey && !g_sloIsLockOn && pressedNow && code == g_cfg.lockOnKey)
+					{
+						g_lockKeyState = !g_lockKeyState;
+						g_lockNoEnemySince = 0;
+						g_lockActive = g_lockKeyState ? 1 : 0;
+						if(g_lockActive && g_cfg.lockOnMode == 0) g_active = 0;
+						_MESSAGE("lock-on key: lock-on assumed %s", g_lockKeyState ? "ON" : "OFF");
+					}
+
+					// Botoes extra: toque (ataque carregado, etc.) e segurar (bloqueio de armas duplas, etc.).
+					if(pressedNow && g_cfg.tapAssist && InList(g_tapKeys, g_numTapKeys, code))
+						AcquireAndTurn(g_cfg.holdMs, true);
+					if(InList(g_holdKeys, g_numHoldKeys, code))
+					{
+						g_holdExtra = held;
+						if(held) { g_lastHoldEvent = GetTickCount(); holdBtnSeen = true; extraHeldNow = true; }
+					}
 				}
 
 				if(!control) continue;
@@ -666,8 +868,8 @@ namespace
 					AcquireAndTurn(g_cfg.holdMs, true);
 			}
 
-			const bool holding = ((g_cfg.holdMode & 1) && g_holdLeft) || ((g_cfg.holdMode & 2) && g_holdRight);
-			if(holding && (holdBtnSeen || GetTickCount() - g_lastHoldEvent <= 250)) HoldTick();
+			const bool holding = ((g_cfg.holdMode & 1) && g_holdLeft) || ((g_cfg.holdMode & 2) && g_holdRight) || g_holdExtra;
+			if(holding && (holdBtnSeen || extraHeldNow || GetTickCount() - g_lastHoldEvent <= 250)) HoldTick();
 			else if(g_active) RetargetTick();
 
 			return kEvent_Continue;
@@ -684,6 +886,7 @@ namespace
 			case SKSEMessagingInterface::kMessage_DataLoaded:
 				ResolveIniPath();
 				LoadConfig();
+				ResolveExternal();
 				break;
 
 			case SKSEMessagingInterface::kMessage_InputLoaded:
@@ -735,6 +938,13 @@ bool SKSEPlugin_Load(const SKSEInterface * skse)
 		_MESSAGE("ABORTING: the messaging interface is not available");
 		return false;
 	}
+
+	g_papyrus = (SKSEPapyrusInterface *)skse->QueryInterface(kInterface_Papyrus);
+	if(g_papyrus && g_papyrus->Register(RegisterPapyrus))
+		_MESSAGE("papyrus interface: registration queued");
+	else
+		_MESSAGE("papyrus interface not available - the in-game menu will not work (the .ini still does)");
+
 	_MESSAGE("running");
 	return true;
 }
