@@ -20,3 +20,9 @@ Function ResetDefaults() global native
 
 ; 0 = active profile (1 without TDM, 2 Coeus), 1 = LockOn.dll found, 2 = Coeus found, 3 = lock-on active
 int Function Status(int what) global native
+
+; Saves all current options as the user's own profile (SoftTargetLE_User.ini).
+Function SaveProfile() global native
+
+; Loads the user's profile over the current options. Returns 1 if a profile existed, 0 if not.
+int Function LoadProfile() global native

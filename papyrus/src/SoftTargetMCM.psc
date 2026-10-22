@@ -19,7 +19,7 @@ int ocount
 int lang		; 0 = English, 1 = Portugues
 
 int Function GetVersion()
-	return 3
+	return 4
 EndFunction
 
 Function InitTables()
@@ -86,8 +86,8 @@ string[] Function MenuChoices(int menuId)
 	elseIf menuId == 7
 		r = new string[3]
 		r[0] = T("Automatic", "Automático")
-		r[1] = T("Without TDM", "Sem TDM")
-		r[2] = T("Coeus (TDM)", "Coeus (TDM)")
+		r[1] = T("Normal (without TDM)", "Normal (sem TDM)")
+		r[2] = T("TDM (directional movement)", "TDM (movimento direcional)")
 	elseIf menuId == 3
 		r = new string[4]
 		r[0] = T("Off", "Desligado")
@@ -240,9 +240,9 @@ EndEvent
 
 string Function ProfileName(int v)
 	if v == 2
-		return T("Coeus (TDM)", "Coeus (TDM)")
+		return T("TDM (directional movement)", "TDM (movimento direcional)")
 	endIf
-	return T("Without TDM", "Sem TDM")
+	return T("Normal (without TDM)", "Normal (sem TDM)")
 EndFunction
 
 Function AddButtonRow(string key, string label, string btn, string info)
@@ -281,7 +281,7 @@ Function PageGeneral()
 	AddEmptyOption()
 	AddToggleRow("Enabled", T("Enabled", "Ativado"), 1.0, T("Turns the whole mod on or off.", "Liga ou desliga o mod inteiro."))
 	AddMenuRow("Language", T("Menu language", "Idioma do menu"), 1, 0.0, T("Language of this menu. Page names update the next time you open the menu.", "Idioma deste menu. Os nomes das páginas mudam na próxima vez que abrir o menu."))
-	AddMenuRow("Profile", T("Profile", "Perfil"), 7, 0.0, T("Automatic: Coeus profile while Coeus directional movement is active, otherwise Without TDM. You can also force one of them.", "Automático: perfil Coeus enquanto o movimento direcional do Coeus está ativo, senão Sem TDM. Também pode forçar um deles."))
+	AddMenuRow("Profile", T("Profile", "Perfil"), 7, 0.0, T("Automatic: the TDM profile is used while Coeus directional movement is active (with EnableUnsheathed=0 that means only while weapons are sheathed); otherwise the normal profile. You can also force one of them.", "Automático: o perfil TDM é usado enquanto o movimento direcional do Coeus está ativo (com EnableUnsheathed=0 isso é só com as armas guardadas); senão o perfil normal. Também pode forçar um deles."))
 	AddEmptyOption()
 	AddHeaderOption(T("Status", "Estado"))
 	AddEmptyOption()
@@ -291,8 +291,10 @@ Function PageGeneral()
 	AddStatusRow(T("LockOn.dll found", "LockOn.dll encontrada"), YesNo(SoftTargetNative.Status(1)), "")
 	AddHeaderOption(T("Settings file", "Ficheiro de configuração"))
 	AddEmptyOption()
-	AddButtonRow("@save", T("Save now", "Guardar agora"), T("[Save]", "[Guardar]"), T("Writes every option to SoftTargetLE.ini. Every change is already saved as you make it; this is a safety copy.", "Grava todas as opções no SoftTargetLE.ini. Cada mudança já é gravada na hora; isto é uma garantia extra."))
+	AddButtonRow("@save", T("Save my profile", "Guardar o meu perfil"), T("[Save]", "[Guardar]"), T("Saves all current options as your own profile (SoftTargetLE_User.ini). Every change is already written to SoftTargetLE.ini as you make it.", "Guarda todas as opções atuais como o seu perfil (SoftTargetLE_User.ini). Cada mudança já é gravada no SoftTargetLE.ini na hora."))
+	AddButtonRow("@load", T("Load my profile", "Carregar o meu perfil"), T("[Load]", "[Carregar]"), T("Replaces all current options with the ones saved in your profile.", "Substitui todas as opções atuais pelas que guardou no seu perfil."))
 	AddButtonRow("@reset", T("Reset to defaults", "Repor valores de fábrica"), T("[Reset]", "[Repor]"), T("Restores all options to the factory values (the language is kept).", "Repõe todas as opções para os valores de fábrica (o idioma é mantido)."))
+	AddEmptyOption()
 	AddHeaderOption(T("Diagnostics", "Diagnóstico"))
 	AddEmptyOption()
 	AddToggleRow("LogOnly", T("Log only (do not turn)", "Só registar (não virar)"), 0.0, T("Only writes the chosen target to the log, without turning the character.", "Só escreve o alvo escolhido no registo, sem virar o personagem."))
@@ -323,7 +325,7 @@ Function PageBody()
 	AddHeaderOption(T("Combos and clicking", "Combos e cliques"))
 	AddEmptyOption()
 	AddToggleRow("TapAssist", T("Turn when attacking", "Virar ao atacar"), 1.0, T("The body turns toward the nearest enemy when you press an attack button (spells included).", "O corpo vira para o inimigo mais próximo quando carrega num botão de ataque (magia incluída)."))
-	AddSliderRow("HoldMilliseconds", T("Combo window", "Janela do combo"), 100.0, 10000.0, 100.0, 3000.0, 0.001, 1, "{1} s", T("Every click keeps the body on the target for this long. The sequence only ends, and the body only returns, after you stop clicking for this time. Default 3 seconds.", "Cada clique mantém o corpo no alvo por este tempo. A sequência só termina, e o corpo só volta, depois de parar de clicar por este tempo. Padrão: 3 segundos."))
+	AddSliderRow("HoldMilliseconds", T("Combat window", "Janela de combate"), 100.0, 10000.0, 100.0, 3000.0, 0.001, 1, "{1} s", T("After an attack or block, the body keeps following the nearest enemy for this long (no click needed). Every new attack or block restarts the timer without changing the target. Default 3 seconds.", "Depois de um ataque ou bloqueio, o corpo continua a seguir o inimigo mais próximo por este tempo (sem precisar clicar). Cada novo ataque ou bloqueio reinicia o temporizador sem mudar o alvo. Padrão: 3 segundos."))
 	AddMenuRow("HoldFaceButton", T("Keep facing while holding", "Encarar enquanto segura"), 3, 3.0, T("While you hold this button (block), the body keeps following the nearest enemy.", "Enquanto segura este botão (bloqueio), o corpo continua a seguir o inimigo mais próximo."))
 	AddEmptyOption()
 	AddHeaderOption(T("Turning", "Giro"))
@@ -332,23 +334,31 @@ Function PageBody()
 	AddSliderRow("Smoothing", T("Smoothing", "Suavização"), 0.0, 30.0, 0.5, 0.0, 1.0, 0, "{1}", T("0 = constant speed. Higher values slow down smoothly when arriving at the target. Try 8 to 15.", "0 = velocidade constante. Valores maiores abrandam suavemente ao chegar ao alvo. Experimente 8 a 15."))
 	AddSliderRow("UpdateMilliseconds", T("Update interval", "Intervalo de atualização"), 1.0, 30.0, 1.0, 8.0, 1.0, 1, "{0} ms", T("How often the turn is updated. Lower is smoother.", "De quanto em quanto tempo o giro é atualizado. Menos é mais fluido."))
 	AddEmptyOption()
-	AddHeaderOption(T("After the combo", "Depois do combo"))
-	AddEmptyOption()
-	AddToggleRow("ReturnToHeading", T("Return to previous heading", "Voltar ao rumo anterior"), 1.0, T("After the combo window ends, the body turns back to where it was facing. Does not return while you hold the walk keys.", "Depois que a janela do combo termina, o corpo volta para onde estava virado. Não volta enquanto segura as teclas de andar."))
-	AddSliderRow("ReturnSpeedDegPerSec", T("Return speed", "Velocidade do regresso"), 90.0, 1000.0, 10.0, 360.0, 1.0, 0, "{0} deg/s", T("How fast the body turns back, in degrees per second.", "Com que velocidade o corpo volta, em graus por segundo."))
-	AddSliderRow("ReturnMaxMilliseconds", T("Max return time", "Tempo máximo do regresso"), 200.0, 3000.0, 50.0, 1200.0, 0.001, 1, "{1} s", T("The return gives up after this time.", "O regresso desiste depois deste tempo."))
+	int prof = SoftTargetNative.GetInt("Profile")
+	if prof == 0 || prof == 1
+		AddHeaderOption(T("Normal profile (without TDM)", "Perfil normal (sem TDM)"))
+		AddEmptyOption()
+		AddSliderRow("MouseOverrideMs", T("Mouse takes over", "Rato assume o controlo"), 0.0, 10000.0, 500.0, 3000.0, 0.001, 1, "{1} s", T("When you move the mouse (or right stick), the body stops following the enemy for this long, so you can look around. Attacking does not cancel it. 0 = off.", "Quando mexe o rato (ou o stick direito), o corpo deixa de seguir o inimigo durante este tempo, para poder olhar à volta. Atacar não cancela. 0 = desligado."))
+		AddEmptyOption()
+		AddToggleRow("ReturnToHeading", T("Return to previous heading", "Voltar ao rumo anterior"), 0.0, T("After the combat window ends, the body turns slowly back to where it was facing. Off by default. Does not return while you hold the walk keys.", "Depois que a janela de combate termina, o corpo volta devagar para onde estava virado. Desligado por padrão. Não volta enquanto segura as teclas de andar."))
+		AddSliderRow("ReturnSpeedDegPerSec", T("Return max speed", "Velocidade máxima do regresso"), 90.0, 1000.0, 10.0, 360.0, 1.0, 0, "{0} deg/s", T("Upper limit of the return speed, in degrees per second.", "Limite máximo da velocidade do regresso, em graus por segundo."))
+		AddSliderRow("ReturnSmoothing", T("Return smoothing", "Suavização do regresso"), 0.5, 15.0, 0.5, 3.0, 1.0, 0, "{1}", T("Lower is slower and softer. Default 3.", "Menos é mais lento e suave. Padrão: 3."))
+		AddEmptyOption()
+	endIf
 EndFunction
 
 Function PageCamera()
 	int prof = SoftTargetNative.GetInt("Profile")
 	if prof == 0 || prof == 2
-		AddHeaderOption(T("Coeus (TDM) profile", "Perfil Coeus (TDM)"))
+		AddHeaderOption(T("TDM profile (directional movement)", "Perfil TDM (movimento direcional)"))
 		AddEmptyOption()
-		AddMenuRow("CameraModeCoeus", T("Camera while turning", "Câmera durante o giro"), 4, 0.0, T("With Coeus the camera is free, so 'Off' (do not touch the camera) is usually right. If the camera spins by itself, keep it on Off.", "Com o Coeus a câmera é livre, então 'Desligado' (não mexer na câmera) costuma ser o certo. Se a câmera girar sozinha, deixe em Desligado."))
-		AddToggleRow("CoeusYield", T("Ask Coeus to let go of the body", "Pedir ao Coeus para largar o corpo"), 1.0, T("While SoftTarget turns the body, Coeus stops rotating it. Walking becomes relative to the body, like in a lock-on.", "Enquanto o SoftTarget vira o corpo, o Coeus deixa de o rodar. Andar passa a ser relativo ao corpo, como num lock-on."))
+		AddMenuRow("CameraModeCoeus", T("Camera while turning", "Câmera durante o giro"), 4, 0.0, T("With TDM the camera is free, so 'Off' (do not touch the camera) is usually right.", "Com o TDM a câmera é livre, então 'Desligado' (não mexer na câmera) costuma ser o certo."))
+		AddSliderRow("AttackPulseMs", T("Turn while walking", "Virar enquanto anda"), 0.0, 1500.0, 50.0, 350.0, 0.001, 1, "{2} s", T("While you walk, the body belongs to TDM (movement follows the camera). Each attack turns it toward the enemy for this long. 0 = never turn while walking.", "Enquanto anda, o corpo é do TDM (o movimento segue a câmera). Cada ataque vira-o para o inimigo durante este tempo. 0 = nunca virar enquanto anda."))
+		AddToggleRow("CoeusYield", T("Lock-on style movement", "Movimento estilo lock-on"), 0.0, T("Asks Coeus to let go of the body, so walking becomes relative to the body (like a lock-on). The camera may follow the body. Not recommended.", "Pede ao Coeus para largar o corpo, então andar fica relativo ao corpo (como num lock-on). A câmera pode acompanhar o corpo. Não recomendado."))
+		AddEmptyOption()
 	endIf
 	if prof == 0 || prof == 1
-		AddHeaderOption(T("Without TDM profile", "Perfil Sem TDM"))
+		AddHeaderOption(T("Normal profile (without TDM)", "Perfil normal (sem TDM)"))
 		AddEmptyOption()
 		AddMenuRow("CameraMode", T("Camera while turning", "Câmera durante o giro"), 4, 3.0, T("Keeps the camera still while the body turns. Offset is the recommended mode.", "Mantém a câmera parada enquanto o corpo vira. Deslocamento é o modo recomendado."))
 		AddEmptyOption()
@@ -381,8 +391,14 @@ Event OnOptionSelect(int a_option)
 		SetToggleOptionValue(a_option, v)
 	elseIf okind[i] == 5
 		if okey[i] == "@save"
-			SoftTargetNative.SaveAll()
+			SoftTargetNative.SaveProfile()
 			SetTextOptionValue(a_option, T("[Saved]", "[Guardado]"))
+		elseIf okey[i] == "@load"
+			if SoftTargetNative.LoadProfile() == 1
+				ForcePageReset()
+			else
+				ShowMessage(T("No saved profile found. Use 'Save my profile' first.", "Nenhum perfil guardado. Use primeiro 'Guardar o meu perfil'."), false)
+			endIf
 		elseIf okey[i] == "@reset"
 			if ShowMessage(T("Restore all SoftTarget options to the factory values?", "Repor todas as opções do SoftTarget para os valores de fábrica?"), true, T("Reset", "Repor"), T("Cancel", "Cancelar"))
 				SoftTargetNative.ResetDefaults()
