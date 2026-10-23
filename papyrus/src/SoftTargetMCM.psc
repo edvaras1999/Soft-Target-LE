@@ -19,7 +19,7 @@ int ocount
 int lang		; 0 = English, 1 = Portugues
 
 int Function GetVersion()
-	return 5
+	return 6
 EndFunction
 
 Function InitTables()
@@ -100,11 +100,9 @@ string[] Function MenuChoices(int menuId)
 		r[2] = T("Restore angle", "Repor o ângulo")
 		r[3] = T("Offset (recommended)", "Deslocamento (recomendado)")
 	elseIf menuId == 5
-		r = new string[4]
+		r = new string[2]
 		r[0] = T("Off", "Desligado")
-		r[1] = T("Tilt the body", "Inclinar o corpo")
-		r[2] = T("Tilt the camera", "Inclinar a câmera")
-		r[3] = T("Both", "Ambos")
+		r[1] = T("Tilt the body (arms only)", "Inclinar o corpo (só os braços)")
 	else
 		r = new string[3]
 		r[0] = T("Pause SoftTarget", "Pausar o SoftTarget")
@@ -338,8 +336,8 @@ Function PageBody()
 	if prof == 0
 		AddHeaderOption(T("Normal profile (without TDM)", "Perfil normal (sem TDM)"))
 		AddEmptyOption()
-		AddSliderRow("MouseOverrideMs", T("Mouse takes over", "Rato assume o controlo"), 0.0, 10000.0, 500.0, 3000.0, 0.001, 1, "{1} s", T("When you move the mouse (or right stick), the body stops following the enemy for this long, so you can look around. Attacking does not cancel it. 0 = off.", "Quando mexe o rato (ou o stick direito), o corpo deixa de seguir o inimigo durante este tempo, para poder olhar à volta. Atacar não cancela. 0 = desligado."))
-		AddEmptyOption()
+		AddToggleRow("FreeCamEnabled", T("Free camera (Shift + mouse)", "Câmera livre (Shift + rato)"), 1.0, T("While the body is locked on the enemy, hold Shift and move the mouse to look around without turning the body. Release Shift and the camera returns behind the character. Shift + W/A/S/D is sprinting: it ends the combat window so you can run away.", "Com o corpo preso ao inimigo, segure Shift e mexa o rato para olhar à volta sem virar o corpo. Ao largar o Shift a câmera volta para trás do personagem. Shift + W/A/S/D é correr: termina a janela de combate para poder fugir."))
+		AddSliderRow("FreeCamSmoothing", T("Camera return smoothing", "Suavização do regresso da câmera"), 0.5, 15.0, 0.5, 3.0, 1.0, 0, "{1}", T("Lower is slower and softer. Default 3.", "Menos é mais lento e suave. Padrão: 3."))
 		AddToggleRow("ReturnToHeading", T("Return to previous heading", "Voltar ao rumo anterior"), 0.0, T("After the combat window ends, the body turns slowly back to where it was facing. Off by default. Does not return while you hold the walk keys.", "Depois que a janela de combate termina, o corpo volta devagar para onde estava virado. Desligado por padrão. Não volta enquanto segura as teclas de andar."))
 		AddSliderRow("ReturnSpeedDegPerSec", T("Return max speed", "Velocidade máxima do regresso"), 90.0, 1000.0, 10.0, 360.0, 1.0, 0, "{0} deg/s", T("Upper limit of the return speed, in degrees per second.", "Limite máximo da velocidade do regresso, em graus por segundo."))
 		AddSliderRow("ReturnSmoothing", T("Return smoothing", "Suavização do regresso"), 0.5, 15.0, 0.5, 3.0, 1.0, 0, "{1}", T("Lower is slower and softer. Default 3.", "Menos é mais lento e suave. Padrão: 3."))
@@ -353,7 +351,7 @@ Function PageCamera()
 		AddHeaderOption(T("TDM profile (directional movement)", "Perfil TDM (movimento direcional)"))
 		AddEmptyOption()
 		AddToggleRow("CoeusYield", T("Face the target while moving", "Encarar o alvo enquanto anda"), 1.0, T("During the combat window Coeus lets go of the body: the character faces the enemy and walks relative to that facing (W = toward the enemy, S = backpedal, A/D = strafe) while the camera stays where you left it. When off, Coeus keeps control while you walk.", "Durante a janela de combate o Coeus larga o corpo: o personagem encara o inimigo e anda relativo a isso (W = para o inimigo, S = recuar, A/D = lateral) enquanto a câmera fica onde a deixou. Desligado, o Coeus mantém o controlo enquanto anda."))
-		AddEmptyOption()
+		AddToggleRow("ScreenRelativeMove", T("Move relative to the screen (experimental)", "Andar relativo ao ecrã (experimental)"), 1.0, T("While facing the target, W/A/S/D move you relative to the screen/camera (W = into the screen), not relative to the body. Direction is picked in 90-degree steps when a key is pressed. Turn off if movement feels wrong or keys seem stuck.", "Enquanto encara o alvo, W/A/S/D movem-no relativo ao ecrã/câmera (W = para dentro do ecrã), e não ao corpo. A direção é escolhida em passos de 90 graus quando carrega na tecla. Desligue se o movimento parecer errado ou as teclas ficarem presas."))
 		AddMenuRow("CameraModeCoeus", T("Camera when not facing the target", "Câmera sem encarar o alvo"), 4, 0.0, T("Only used when 'Face the target while moving' is off. 'Off' (do not touch the camera) is usually right.", "Só é usado quando 'Encarar o alvo enquanto anda' está desligado. 'Desligado' (não mexer na câmera) costuma ser o certo."))
 		AddSliderRow("AttackPulseMs", T("Turn while walking", "Virar enquanto anda"), 0.0, 1500.0, 50.0, 350.0, 0.001, 1, "{2} s", T("Only when 'Face the target while moving' is off: each attack turns the walking body toward the enemy for this long. 0 = never.", "Só quando 'Encarar o alvo enquanto anda' está desligado: cada ataque vira o corpo em movimento para o inimigo durante este tempo. 0 = nunca."))
 	endIf
@@ -373,7 +371,7 @@ EndFunction
 Function PageMagic()
 	AddHeaderOption(T("Vertical aim (spells)", "Mira vertical (magia)"))
 	AddEmptyOption()
-	AddMenuRow("VerticalMode", T("Vertical aim", "Mira vertical"), 5, 0.0, T("Tilts the body or the camera so spells hit enemies above or below you.", "Inclina o corpo ou a câmera para a magia acertar em inimigos acima ou abaixo de si."))
+	AddMenuRow("VerticalMode", T("Vertical aim", "Mira vertical"), 5, 0.0, T("Tilts the body (arms) so attacks and spells hit enemies above or below you. The camera is never touched. After the combat window the body returns to level.", "Inclina o corpo (os braços) para os ataques e magias acertarem em inimigos acima ou abaixo de si. A câmera nunca é tocada. Depois da janela de combate o corpo volta ao nível."))
 	AddToggleRow("VerticalInvert", T("Invert tilt", "Inverter a inclinação"), 0.0, T("Turn on if spells go up when they should go down.", "Ligue se a magia sobe quando devia descer."))
 	AddSliderRow("AimHeight", T("Aim height on enemy", "Altura da mira no inimigo"), 0.0, 200.0, 5.0, 100.0, 1.0, 0, "{0}", T("Height of the aim point above the enemy's feet. 100 is the chest of a human.", "Altura do ponto de mira acima dos pés do inimigo. 100 é o peito de um humano."))
 	AddSliderRow("PlayerAimHeight", T("Aim height on player", "Altura da mira no jogador"), 0.0, 200.0, 5.0, 110.0, 1.0, 0, "{0}", T("Height the spell leaves from, above your feet.", "Altura de onde a magia sai, acima dos seus pés."))
