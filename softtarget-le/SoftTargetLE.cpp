@@ -14,6 +14,7 @@
 #include "skse/skse_version.h"
 #include "skse/GameRTTI.h"
 #include "skse/GameCamera.h"
+#include "skse/NiNodes.h"
 #include "skse/PapyrusVM.h"
 #include "skse/PapyrusNativeFunctions.h"
 #include "Log.h"
