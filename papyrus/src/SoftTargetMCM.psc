@@ -19,7 +19,7 @@ int ocount
 int lang		; 0 = English, 1 = Portugues
 
 int Function GetVersion()
-	return 6
+	return 7
 EndFunction
 
 Function InitTables()
@@ -94,11 +94,9 @@ string[] Function MenuChoices(int menuId)
 		r[2] = T("Right button (M1)", "Botão direito (M1)")
 		r[3] = T("Both", "Ambos")
 	elseIf menuId == 4
-		r = new string[4]
-		r[0] = T("Off (do not touch the camera)", "Desligado (não mexe na câmera)")
-		r[1] = T("Counter-rotate", "Contra-rotação")
-		r[2] = T("Restore angle", "Repor o ângulo")
-		r[3] = T("Offset (recommended)", "Deslocamento (recomendado)")
+		r = new string[2]
+		r[0] = T("Follows the target", "Acompanha o alvo")
+		r[1] = T("Stays still", "Fica parada")
 	elseIf menuId == 5
 		r = new string[2]
 		r[0] = T("Off", "Desligado")
@@ -350,15 +348,14 @@ Function PageCamera()
 	if prof == 1
 		AddHeaderOption(T("TDM profile (directional movement)", "Perfil TDM (movimento direcional)"))
 		AddEmptyOption()
-		AddToggleRow("CoeusYield", T("Face the target while moving", "Encarar o alvo enquanto anda"), 1.0, T("During the combat window Coeus lets go of the body: the character faces the enemy and walks relative to that facing (W = toward the enemy, S = backpedal, A/D = strafe) while the camera stays where you left it. When off, Coeus keeps control while you walk.", "Durante a janela de combate o Coeus larga o corpo: o personagem encara o inimigo e anda relativo a isso (W = para o inimigo, S = recuar, A/D = lateral) enquanto a câmera fica onde a deixou. Desligado, o Coeus mantém o controlo enquanto anda."))
+		AddToggleRow("CoeusYield", T("Face the target while moving", "Encarar o alvo enquanto anda"), 1.0, T("During the combat window Coeus lets go of the body: the character faces the enemy and walks relative to that facing (W = toward the enemy, S = backpedal, A/D = strafe) while the camera stays free (this mod keeps free rotation on). When off, Coeus keeps control while you walk.", "Durante a janela de combate o Coeus larga o corpo: o personagem encara o inimigo e anda relativo a isso (W = para o inimigo, S = recuar, A/D = lateral) enquanto a câmera fica onde a deixou. Desligado, o Coeus mantém o controlo enquanto anda."))
 		AddToggleRow("ScreenRelativeMove", T("Move relative to the screen (experimental)", "Andar relativo ao ecrã (experimental)"), 1.0, T("While facing the target, W/A/S/D move you relative to the screen/camera (W = into the screen), not relative to the body. Direction is picked in 90-degree steps when a key is pressed. Turn off if movement feels wrong or keys seem stuck.", "Enquanto encara o alvo, W/A/S/D movem-no relativo ao ecrã/câmera (W = para dentro do ecrã), e não ao corpo. A direção é escolhida em passos de 90 graus quando carrega na tecla. Desligue se o movimento parecer errado ou as teclas ficarem presas."))
-		AddMenuRow("CameraModeCoeus", T("Camera when not facing the target", "Câmera sem encarar o alvo"), 4, 0.0, T("Only used when 'Face the target while moving' is off. 'Off' (do not touch the camera) is usually right.", "Só é usado quando 'Encarar o alvo enquanto anda' está desligado. 'Desligado' (não mexer na câmera) costuma ser o certo."))
 		AddSliderRow("AttackPulseMs", T("Turn while walking", "Virar enquanto anda"), 0.0, 1500.0, 50.0, 350.0, 0.001, 1, "{2} s", T("Only when 'Face the target while moving' is off: each attack turns the walking body toward the enemy for this long. 0 = never.", "Só quando 'Encarar o alvo enquanto anda' está desligado: cada ataque vira o corpo em movimento para o inimigo durante este tempo. 0 = nunca."))
 	endIf
 	if prof == 0
 		AddHeaderOption(T("Normal profile (without TDM)", "Perfil normal (sem TDM)"))
 		AddEmptyOption()
-		AddMenuRow("CameraMode", T("Camera while turning", "Câmera durante o giro"), 4, 3.0, T("Keeps the camera still while the body turns. Offset is the recommended mode.", "Mantém a câmera parada enquanto o corpo vira. Deslocamento é o modo recomendado."))
+		AddMenuRow("CameraMode", T("Camera while turning", "Câmera durante o giro"), 4, 0.0, T("Follows the target: the camera turns with the body (vanilla). Stays still: the camera keeps its view while the body turns. Shift + mouse always gives a free camera.", "Acompanha o alvo: a câmera vira com o corpo (como no jogo). Fica parada: a câmera mantém a vista enquanto o corpo vira. Shift + rato dá sempre câmera livre."))
 		AddEmptyOption()
 	endIf
 	AddHeaderOption(T("Lock-on (Simple Lock-On / Coeus)", "Lock-on (Simple Lock-On / Coeus)"))
