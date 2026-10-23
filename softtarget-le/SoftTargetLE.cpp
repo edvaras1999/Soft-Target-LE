@@ -26,7 +26,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.9.0 (camera livre com Shift, mira vertical so no corpo, movimento relativo a tela, lock-on assistido)"
+#define PLUGIN_VERSION_STR	"0.10.0 (rotacao livre da camera, registo melhor)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -71,7 +71,7 @@ namespace
 		float	freeCamSmoothing;// suavizacao do regresso da camera para tras do personagem
 		int		screenRelativeMove;// perfil TDM, a encarar o alvo: W/A/S/D relativos a tela (experimental)
 		int		attackPulseMs;	// perfil TDM: ao atacar a andar, vira para o alvo durante este tempo
-		int		cameraMode;		// 0 = nao mexe; 1 = contra-rotacao; 2 = repoe angulo; 3 = deslocamento (recomendado)
+		int		cameraMode;		// perfil normal: 0 = a camera acompanha o corpo/alvo; 1 = fica parada (rotacao livre)
 		int		lockOnKey;		// codigo da tecla do lock-on (reserva se a LockOn.dll nao existir)
 		int		lockOnMode;		// com lock-on ativo: 0 = pausa o SoftTarget; 1 = so corpo, sem mexer na camera; 2 = pausa e troca o lock-on para o inimigo mais proximo
 		int		coeusYield;		// 1 = enquanto vira, pede ao Coeus para largar a rotacao do corpo
@@ -83,7 +83,7 @@ namespace
 		int		language;		// idioma do menu: 0 = ingles, 1 = portugues
 		int		profileMode;	// 0 = normal (sem TDM, ou Coeus com EnableUnsheathed=0), 1 = TDM (movimento direcional)
 		int		lockOnSwitchKey;// tecla para trocar de alvo no lock-on (0 = a que a LockOn.dll indica)
-		int		cameraModeCoeus;// camera no perfil Coeus (0 = nao mexe, recomendado)
+		int		cameraModeCoeus;// camera no perfil TDM sem "encarar o alvo" (0 = nao mexe)
 		int		stickyTarget;	// 1 = durante uma sequencia de golpes mantem o alvo enquanto for valido
 		int		allowReanimated;// 1 = aceita inimigos reanimados / sem estado de vida normal
 	};
@@ -236,6 +236,8 @@ namespace
 		g_numShiftKeys = ParseKeys("ShiftKeys", g_shiftKeys, kMaxKeys);
 		if(g_numShiftKeys == 0) { g_shiftKeys[0] = 42; g_shiftKeys[1] = 54; g_numShiftKeys = 2; }	// Shift esquerdo e direito
 		g_cfg.verticalMode &= 1;
+		if(g_cfg.cameraMode > 1) g_cfg.cameraMode = 1;			// os modos antigos 2 e 3 passam a "parada"
+		if(g_cfg.cameraModeCoeus > 1) g_cfg.cameraModeCoeus = 1;
 
 		if(g_cfg.updateMs < 1)		g_cfg.updateMs = 1;
 		if(g_cfg.updateMs > 50)		g_cfg.updateMs = 50;
@@ -335,7 +337,7 @@ namespace
 	// Perfil escolhido no menu: true = TDM (movimento direcional do Coeus com armas na mao).
 	bool InCoeusProfile() { return g_cfg.profileMode == 1; }
 
-	int EffCameraMode() { return InCoeusProfile() ? g_cfg.cameraModeCoeus : g_cfg.cameraMode; }
+	int EffCameraMode() { return InCoeusProfile() ? 0 : g_cfg.cameraMode; }
 
 	// ------------------------------------------------------------------ funcoes nativas (menu)
 	const Opt * FindOpt(const char * key)
@@ -499,6 +501,7 @@ namespace
 
 	// ------------------------------------------------------------------ escolha do alvo
 	UInt32 g_lastTargetId = 0;
+	volatile LONG	g_endReason = 0;		// por que a ultima sessao acabou: 0 tempo, 1 correr, 2 lock-on, 3 sem alvo
 	volatile LONG	g_forceCircle = 0;	// 1 = ignora o cone (usado pela ajuda do lock-on)
 	volatile LONG	g_active	= 0;		// 1 = sessao de combate em curso (o corpo encara o alvo mais proximo)
 	volatile LONG	g_shiftHeld = 0;		// Shift (ou outra tecla de ShiftKeys) carregado
@@ -683,21 +686,23 @@ namespace
 		return want;
 	}
 
-	void CameraYawCompensate(UInt8 * cs, float step, float camYaw0, int mode)
+	// Rotacao livre da camera: a mesma que o Coeus liga no TDM. Com o byte em 0xB4 ligado a camera fica em
+	// corpo + deslocamento (0xAC) e o rato muda so o deslocamento (o corpo nao roda com o rato).
+	// Devolve true se fomos nos a liga-la agora (a camera nao salta: o deslocamento parte da posicao atual).
+	bool EnsureFreeRot(UInt8 * cs, float bodyYaw)
+	{
+		if(*(cs + 0xB4)) return false;
+		*(float *)(cs + 0xAC) = WrapPi(*(float *)(cs + 0x5C) - bodyYaw);
+		*(cs + 0xB4) = 1;
+		return true;
+	}
+
+	// O corpo girou 'step': tira-se o mesmo ao deslocamento e a camera fica parada.
+	void CameraHold(UInt8 * cs, float step)
 	{
 		if(!cs) return;
-		if(mode == 3)
-		{
-			// O jogo calcula camera = corpo + deslocamento a cada quadro. Tiramos ao deslocamento o
-			// mesmo giro dado ao corpo, e a propria conta do jogo deixa a camera parada.
-			float * off = (float *)(cs + 0xAC);
-			*off = WrapPi(*off - step);
-			return;
-		}
-		float * y1 = (float *)(cs + 0x5C);
-		float * y2 = (float *)(cs + 0x60);
-		if(mode == 1)		{ *y1 -= step; *y2 -= step; }
-		else if(mode == 2)	{ *y1 = camYaw0; *y2 = camYaw0; }
+		float * off = (float *)(cs + 0xAC);
+		*off = WrapPi(*off - step);
 	}
 
 	// ---- ajuda do lock-on: trocar para o inimigo mais proximo
@@ -754,9 +759,9 @@ namespace
 	{
 		DWORD last = GetTickCount();
 		int   phase = 0;					// 0 = parado, 1 = a seguir o alvo, 2 = a regressar (rumo e/ou inclinacao)
-		float homeYaw = 0.0f, homePitch = 0.0f, camYaw0 = 0.0f, lastBody = 0.0f;
+		float homeYaw = 0.0f, homePitch = 0.0f;
 		DWORD returnStart = 0, lastYield = 0, lastRetarget = 0, noTargetSince = 0;
-		bool  yielding = false, returnYaw = false, camReturn = false, wasFreeCam = false;
+		bool  yielding = false, returnYaw = false, weSetFlag = false, prevActive = false;
 		int   lastProfile = -1;
 		DWORD lastAssist = 0, lastSwitch = 0, keyAt = 0;
 		int   attempts = 0;
@@ -771,7 +776,7 @@ namespace
 			if(dt > 0.1f) dt = 0.1f;
 
 			// A sessao acaba quando passa o tempo sem novos botoes.
-			if(g_active && (LONG)(now - g_endTick) >= 0) g_active = 0;
+			if(g_active && (LONG)(now - g_endTick) >= 0) { g_endReason = 0; g_active = 0; }
 
 			PlayerCharacter * player = Engine::Player();
 			if(!player) { phase = 0; continue; }
@@ -784,10 +789,10 @@ namespace
 			}
 
 			// Correr (Shift + andar) = fugir: a sessao acaba e o corpo volta a ser do jogador / do Coeus.
-			if(g_active && g_shiftHeld && g_moveHeld) { g_active = 0; phase = 0; _MESSAGE("combat window ended (sprint)"); }
+			if(g_active && g_shiftHeld && g_moveHeld) { g_endReason = 1; g_active = 0; phase = 0; }
 
 			// Lock-on ativo (SoftTarget em pausa): larga tudo, sem regressar ao rumo antigo.
-			if(LockPauses()) { phase = 0; g_active = 0; }
+			if(LockPauses()) { phase = 0; if(g_active) g_endReason = 2; g_active = 0; }
 
 			// Lock-on assistido (LockOnMode=2): se o lock-on esta num inimigo que nao e o mais proximo,
 			// carrega na tecla de trocar alvo da LockOn.dll. Desliga-se sozinho se a tecla desligar o lock-on.
@@ -838,10 +843,23 @@ namespace
 				else
 				{
 					if(!noTargetSince) noTargetSince = now;
-					else if(now - noTargetSince > 300) { g_active = 0; noTargetSince = 0; }	// alvo saiu da area
+					else if(now - noTargetSince > 300) { g_endReason = 3; g_active = 0; noTargetSince = 0; }	// alvo saiu da area
 				}
 			}
 			if(!g_active) noTargetSince = 0;
+
+			// Registo: inicio e fim de cada sessao de combate (e o motivo do fim).
+			if(g_active && !prevActive)
+			{
+				UInt8 * c0 = ThirdPersonStatePtr();
+				_MESSAGE("session start: profile=%s target=%08X handle=%08X freeRot=%d camOffset=%.2f", coeusProfile ? "TDM" : "normal", g_lastTargetId, (UInt32)g_targetHandle, c0 ? (int)*(c0 + 0xB4) : -1, c0 ? *(float *)(c0 + 0xAC) : 0.0f);
+			}
+			else if(!g_active && prevActive)
+			{
+				static const char * why[] = { "timeout", "sprint", "lock-on active", "no target in range" };
+				_MESSAGE("session end: %s", why[(g_endReason >= 0 && g_endReason < 4) ? g_endReason : 0]);
+			}
+			prevActive = (g_active != 0);
 
 			// Perfil TDM sem "encarar o alvo": enquanto anda o corpo e do Coeus; so ha um "pulso" depois de cada ataque.
 			const bool suppress = coeusProfile && !g_cfg.coeusYield && g_moveHeld && (now - g_lastAttackTick) >= (DWORD)g_cfg.attackPulseMs;
@@ -871,20 +889,25 @@ namespace
 			}
 			g_remapActive = (wantYield && g_cfg.screenRelativeMove) ? 1 : 0;
 
-			// Camera. Normal: modo escolhido (3 = fica parada). TDM a encarar o alvo: fica parada.
-			// Camera livre (Shift + rato, so perfil normal): o rato move so a camera, o corpo continua no alvo.
-			const int camMode = wantYield ? 3 : EffCameraMode();
+			// Camera. A camera "fica parada" (rotacao livre ligada por nos, com o deslocamento a compensar o giro do corpo) quando:
+			//  - o Coeus largou o corpo (perfil TDM a encarar o alvo), para a camera continuar livre como no TDM;
+			//  - o perfil normal tem CameraMode=1;
+			//  - Shift esta carregado com a sessao ativa (camera livre: o rato move so a camera; o corpo fica no alvo).
+			// Fora disso a camera acompanha o corpo (comportamento do jogo).
 			const bool freeCam = !coeusProfile && g_cfg.freeCamEnabled && g_shiftHeld && !g_moveHeld && g_active;
-			if(freeCam) { wasFreeCam = true; camReturn = false; }
-			else if(wasFreeCam) { wasFreeCam = false; camReturn = true; }	// largou o Shift: a camera volta para tras do personagem
-
-			const bool wantCam = (camMode != 0) || freeCam || camReturn;
-			UInt8 * cs = (wantCam && !g_lockActive) ? ThirdPersonStatePtr() : NULL;
+			const bool hold = g_active && !suppress && !g_lockActive && (wantYield || EffCameraMode() >= 1 || freeCam);
+			UInt8 * cs = (hold || weSetFlag) ? ThirdPersonStatePtr() : NULL;
 			NiPoint3 & rot = Engine::Rotation(player);
 			const float maxRad = g_cfg.turnSpeedDeg * kPi / 180.0f;
 			const float limitRad = g_cfg.verticalLimitDeg * kPi / 180.0f;
 			const float vSign = g_cfg.verticalInvert ? -1.0f : 1.0f;
 			const bool returnAllowed = g_cfg.returnToHeading && !coeusProfile;
+
+			if(hold && cs && EnsureFreeRot(cs, rot.z))
+			{
+				weSetFlag = true;
+				_MESSAGE("camera: free rotation ON (offset %.2f)", *(float *)(cs + 0xAC));
+			}
 
 			if(g_active && !suppress)
 			{
@@ -893,31 +916,16 @@ namespace
 					// Inicio da sessao: guarda de onde partimos (rumo e inclinacao do corpo).
 					homeYaw = rot.z;
 					homePitch = rot.x;
-					lastBody = rot.z;
-					if(cs) camYaw0 = *(float *)(cs + 0x5C);
 					phase = 1;
 				}
-				else if(phase == 2) { phase = 1; lastBody = rot.z; }
-
-				// Camera livre: o que o rato fez ao corpo desde a ultima volta passa para o deslocamento da camera.
-				if(freeCam && cs)
-				{
-					const float d = WrapPi(rot.z - lastBody);
-					if(fabsf(d) > 1e-5f)
-					{
-						float * off = (float *)(cs + 0xAC);
-						*off = WrapPi(*off + d);
-						rot.z = lastBody;
-					}
-				}
+				else if(phase == 2) phase = 1;
 
 				const float stepYaw = StepToward(rot.z, g_targetYaw, true, dt, maxRad, g_cfg.smoothing);
 				rot.z = WrapPi(rot.z + stepYaw);
-				CameraYawCompensate(cs, stepYaw, camYaw0, camMode);
-				lastBody = rot.z;
+				if(hold) CameraHold(cs, stepYaw);
 
-				// Mira vertical: so o corpo (bracos); a camera nunca e tocada. Com a camera livre o rato manda.
-				if(g_hasPitch && (g_cfg.verticalMode & 1) && !freeCam)
+				// Mira vertical: so o corpo (bracos); a camera nunca e tocada.
+				if(g_hasPitch && (g_cfg.verticalMode & 1))
 				{
 					float up = g_targetPitchUp;
 					if(up >  limitRad) up =  limitRad;
@@ -945,7 +953,6 @@ namespace
 				{
 					const float stepYaw = StepToward(rot.z, homeYaw, true, dt, returnRad, g_cfg.returnSmoothing);
 					rot.z = WrapPi(rot.z + stepYaw);
-					CameraYawCompensate(cs, stepYaw, camYaw0, camMode);
 					if(fabsf(WrapPi(homeYaw - rot.z)) >= 0.01f) done = false;
 				}
 				if(g_cfg.verticalMode & 1)
@@ -957,17 +964,29 @@ namespace
 				if(done || (LONG)(now - returnStart) >= 6000) phase = 0;
 			}
 
-			// Camera de volta para tras do personagem (deslocamento -> 0), devagar, depois de largar a camera livre.
-			if(camReturn)
+			// Fim da camera parada: no perfil normal a camera volta devagar para tras do personagem (deslocamento -> 0)
+			// e a rotacao livre e desligada; no perfil TDM o Coeus retoma a camera tal como esta.
+			if(weSetFlag && !hold)
 			{
-				if(!cs) { if(!g_lockActive && !ThirdPersonStatePtr()) camReturn = false; }
-				else
+				if(coeusProfile || g_lockActive)
+				{
+					weSetFlag = false;
+					_MESSAGE("camera: free rotation handed over");
+				}
+				else if(cs)
 				{
 					float * off = (float *)(cs + 0xAC);
-					const float st = StepToward(*off, 0.0f, true, dt, 4.2f, g_cfg.freeCamSmoothing);	// 4,2 rad/s ~ 240 graus/s no maximo
+					const float st = StepToward(*off, 0.0f, true, dt, 4.2f, g_cfg.freeCamSmoothing);	// ~240 graus/s no maximo
 					*off = WrapPi(*off + st);
-					if(fabsf(*off) < 0.01f) { *off = 0.0f; camReturn = false; }
+					if(fabsf(*off) < 0.01f)
+					{
+						*off = 0.0f;
+						*(cs + 0xB4) = 0;
+						weSetFlag = false;
+						_MESSAGE("camera: free rotation OFF (camera is behind the character again)");
+					}
 				}
+				else if(!ThirdPersonStatePtr()) weSetFlag = false;
 			}
 		}
 		return 0;
@@ -1057,8 +1076,13 @@ namespace
 		__try { if(g_coeusIsLock) cLock = g_coeusIsLock() ? 1 : 0; } __except(EXCEPTION_EXECUTE_HANDLER) { }
 		__try { if(g_coeusIsExt) cExt = g_coeusIsExt() ? 1 : 0; } __except(EXCEPTION_EXECUTE_HANDLER) { }
 
-		_MESSAGE("probe: state=%u camDist=%.1f fov=%.1f | player rotZ=%.3f rotX=%.3f | lock: ours=%d slo=%d coeusLock=%d coeusExt=%d | active=%d move=%d shift=%d",
-				 st ? (unsigned)st->stateId : 0xFFFFu, camDist, fov, rot.z, rot.x,
+		int frFlag = -1; float frOff = 0.0f, camYawV = 0.0f;
+		{
+			UInt8 * c1 = ThirdPersonStatePtr();
+			if(c1) { frFlag = (int)*(c1 + 0xB4); frOff = *(float *)(c1 + 0xAC); camYawV = *(float *)(c1 + 0x5C); }
+		}
+		_MESSAGE("probe: state=%u camDist=%.1f fov=%.1f | player rotZ=%.3f rotX=%.3f | camYaw=%.3f freeRot=%d offset=%.3f | lock: ours=%d slo=%d coeusLock=%d coeusExt=%d | active=%d move=%d shift=%d",
+				 st ? (unsigned)st->stateId : 0xFFFFu, camDist, fov, rot.z, rot.x, camYawV, frFlag, frOff,
 				 (int)g_lockActive, sloNow, cLock, cExt, (int)g_active, (int)g_moveHeld, (int)g_shiftHeld);
 
 		if(st)
@@ -1243,7 +1267,7 @@ namespace
 				}
 				else g_lockNoEnemySince = 0;
 			}
-			if(LockPauses()) g_active = 0;
+			if(LockPauses()) { if(g_active) g_endReason = 2; g_active = 0; }
 
 			bool holdBtnSeen = false;
 			bool extraHeldNow = false;
