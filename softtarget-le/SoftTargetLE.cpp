@@ -14,6 +14,8 @@
 #include "skse/skse_version.h"
 #include "skse/GameRTTI.h"
 #include "skse/GameCamera.h"
+#include "skse/GameObjects.h"
+#include "skse/GameMenus.h"
 #include "skse/NiNodes.h"
 #include "skse/PapyrusVM.h"
 #include "skse/PapyrusNativeFunctions.h"
@@ -26,7 +28,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.10.0 (rotacao livre da camera, registo melhor)"
+#define PLUGIN_VERSION_STR	"0.11.0 (lock-on proprio + previsao do disparo)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -67,11 +69,7 @@ namespace
 		int		returnToHeading;// 1 = depois do golpe o corpo volta ao rumo anterior
 		float	returnSpeedDeg;	// velocidade do regresso, graus por segundo
 		float	returnSmoothing;// suavizacao do regresso (menor = mais lento)
-		int		freeCamEnabled;	// perfil normal: Shift + rato = camera livre enquanto o corpo encara o alvo
-		float	freeCamSmoothing;// suavizacao do regresso da camera para tras do personagem
-		int		screenRelativeMove;// perfil TDM, a encarar o alvo: W/A/S/D relativos a tela (experimental)
 		int		attackPulseMs;	// perfil TDM: ao atacar a andar, vira para o alvo durante este tempo
-		int		cameraMode;		// perfil normal: 0 = a camera acompanha o corpo/alvo; 1 = fica parada (rotacao livre)
 		int		lockOnKey;		// codigo da tecla do lock-on (reserva se a LockOn.dll nao existir)
 		int		lockOnMode;		// com lock-on ativo: 0 = pausa o SoftTarget; 1 = so corpo, sem mexer na camera; 2 = pausa e troca o lock-on para o inimigo mais proximo
 		int		coeusYield;		// 1 = enquanto vira, pede ao Coeus para largar a rotacao do corpo
@@ -83,9 +81,26 @@ namespace
 		int		language;		// idioma do menu: 0 = ingles, 1 = portugues
 		int		profileMode;	// 0 = normal (sem TDM, ou Coeus com EnableUnsheathed=0), 1 = TDM (movimento direcional)
 		int		lockOnSwitchKey;// tecla para trocar de alvo no lock-on (0 = a que a LockOn.dll indica)
-		int		cameraModeCoeus;// camera no perfil TDM sem "encarar o alvo" (0 = nao mexe)
 		int		stickyTarget;	// 1 = durante uma sequencia de golpes mantem o alvo enquanto for valido
 		int		allowReanimated;// 1 = aceita inimigos reanimados / sem estado de vida normal
+		// ---- lock-on proprio
+		int		lockEnabled;	// 1 = lock-on proprio ligado
+		int		lockKey;		// tecla que liga/desliga (33 = F; 256 + botao do rato: 258 = M3)
+		int		lockSwitchKey;	// tecla que troca de alvo (258 = M3)
+		float	lockRange;		// alcance maximo do lock-on
+		float	lockAcquireDeg;	// angulo maximo entre a mira e o corpo do alvo para o poder prender
+		int		lockHostileOnly;// 1 = so prende inimigos
+		int		lockLoseSightMs;// tempo sem ver o alvo ate o lock-on largar
+		float	lockLoseAngleDeg;// angulo a partir do qual o alvo conta como fora da vista
+		int		lockAutoNext;	// 1 = quando o alvo morre, passa para o inimigo mais proximo
+		int		lockCameraFollow;// 1 = (perfil normal) a camera acompanha o alvo
+		int		lockCameraPitch;// 1 = a camera tambem sobe/desce para o alvo
+		float	lockCameraSmooth;// velocidade da camera a seguir o alvo (maior = mais rapido)
+		int		predictEnabled;	// 1 = previsao do disparo com o lock-on ativo
+		float	projectileSpeed;// velocidade do projetil, unidades por segundo
+		float	projectileGravity;// queda do projetil (unidades por segundo ao quadrado; 0 = sem compensacao)
+		float	predictStrength;// 0..100: quanto da previsao se aplica
+		float	predictMinDist;	// abaixo desta distancia nao ha previsao
 	};
 	Config g_cfg;
 
@@ -114,11 +129,7 @@ namespace
 		{ "ReturnToHeading",		'i', &g_cfg.returnToHeading,	0.0f },
 		{ "ReturnSpeedDegPerSec",	'f', &g_cfg.returnSpeedDeg,		360.0f },
 		{ "ReturnSmoothing",		'f', &g_cfg.returnSmoothing,	3.0f },
-		{ "FreeCamEnabled",			'i', &g_cfg.freeCamEnabled,		1.0f },
-		{ "FreeCamSmoothing",		'f', &g_cfg.freeCamSmoothing,	3.0f },
-		{ "ScreenRelativeMove",		'i', &g_cfg.screenRelativeMove,	1.0f },
 		{ "AttackPulseMs",			'i', &g_cfg.attackPulseMs,		350.0f },
-		{ "CameraMode",				'i', &g_cfg.cameraMode,			0.0f },
 		{ "LockOnKey",				'i', &g_cfg.lockOnKey,			0.0f },
 		{ "LockOnMode",				'i', &g_cfg.lockOnMode,			0.0f },
 		{ "CoeusYield",				'i', &g_cfg.coeusYield,			1.0f },
@@ -128,11 +139,27 @@ namespace
 		{ "VerticalInvert",			'i', &g_cfg.verticalInvert,		0.0f },
 		{ "VerticalLimitDegrees",	'f', &g_cfg.verticalLimitDeg,	45.0f },
 		{ "Language",				'i', &g_cfg.language,			0.0f },
-		{ "ProfileMode",			'i', &g_cfg.profileMode,		1.0f },
+		{ "ProfileMode",			'i', &g_cfg.profileMode,		0.0f },
 		{ "LockOnSwitchKey",		'i', &g_cfg.lockOnSwitchKey,	0.0f },
-		{ "CameraModeCoeus",		'i', &g_cfg.cameraModeCoeus,	0.0f },
 		{ "StickyTarget",			'i', &g_cfg.stickyTarget,		1.0f },
 		{ "AllowReanimated",		'i', &g_cfg.allowReanimated,	1.0f },
+		{ "LockEnabled",			'i', &g_cfg.lockEnabled,		1.0f },
+		{ "LockKey",				'i', &g_cfg.lockKey,			33.0f },
+		{ "LockSwitchKey",			'i', &g_cfg.lockSwitchKey,		258.0f },
+		{ "LockRange",				'f', &g_cfg.lockRange,			4000.0f },
+		{ "LockAcquireDegrees",		'f', &g_cfg.lockAcquireDeg,		30.0f },
+		{ "LockHostileOnly",		'i', &g_cfg.lockHostileOnly,	1.0f },
+		{ "LockLoseSightMs",		'i', &g_cfg.lockLoseSightMs,	1500.0f },
+		{ "LockLoseAngleDegrees",	'f', &g_cfg.lockLoseAngleDeg,	75.0f },
+		{ "LockAutoNext",			'i', &g_cfg.lockAutoNext,		1.0f },
+		{ "LockCameraFollow",		'i', &g_cfg.lockCameraFollow,	1.0f },
+		{ "LockCameraPitch",		'i', &g_cfg.lockCameraPitch,	1.0f },
+		{ "LockCameraSmooth",		'f', &g_cfg.lockCameraSmooth,	8.0f },
+		{ "PredictEnabled",			'i', &g_cfg.predictEnabled,		1.0f },
+		{ "ProjectileSpeed",		'f', &g_cfg.projectileSpeed,	4500.0f },
+		{ "ProjectileGravity",		'f', &g_cfg.projectileGravity,	0.0f },
+		{ "PredictStrength",		'f', &g_cfg.predictStrength,	100.0f },
+		{ "PredictMinDistance",		'f', &g_cfg.predictMinDist,		400.0f },
 	};
 	const int kNumOpts = sizeof(g_opts) / sizeof(g_opts[0]);
 
@@ -236,18 +263,26 @@ namespace
 		g_numShiftKeys = ParseKeys("ShiftKeys", g_shiftKeys, kMaxKeys);
 		if(g_numShiftKeys == 0) { g_shiftKeys[0] = 42; g_shiftKeys[1] = 54; g_numShiftKeys = 2; }	// Shift esquerdo e direito
 		g_cfg.verticalMode &= 1;
-		if(g_cfg.cameraMode > 1) g_cfg.cameraMode = 1;			// os modos antigos 2 e 3 passam a "parada"
-		if(g_cfg.cameraModeCoeus > 1) g_cfg.cameraModeCoeus = 1;
+		if(g_cfg.lockRange < 300.0f)		g_cfg.lockRange = 300.0f;
+		if(g_cfg.lockAcquireDeg < 2.0f)		g_cfg.lockAcquireDeg = 2.0f;
+		if(g_cfg.lockAcquireDeg > 90.0f)	g_cfg.lockAcquireDeg = 90.0f;
+		if(g_cfg.lockLoseAngleDeg < 20.0f)	g_cfg.lockLoseAngleDeg = 20.0f;
+		if(g_cfg.lockLoseAngleDeg > 170.0f)	g_cfg.lockLoseAngleDeg = 170.0f;
+		if(g_cfg.lockLoseSightMs < 0)		g_cfg.lockLoseSightMs = 0;
+		if(g_cfg.lockCameraSmooth < 1.0f)	g_cfg.lockCameraSmooth = 1.0f;
+		if(g_cfg.projectileSpeed < 500.0f)	g_cfg.projectileSpeed = 500.0f;
+		if(g_cfg.predictStrength < 0.0f)	g_cfg.predictStrength = 0.0f;
+		if(g_cfg.predictStrength > 150.0f)	g_cfg.predictStrength = 150.0f;
 
 		if(g_cfg.updateMs < 1)		g_cfg.updateMs = 1;
 		if(g_cfg.updateMs > 50)		g_cfg.updateMs = 50;
 		if(g_cfg.retargetMs < 16)	g_cfg.retargetMs = 16;
 
-		_MESSAGE("config (%s%s): enabled=%d logOnly=%d shape=%s range=%.0f cone=%.0f turn=%.0f smooth=%.1f update=%dms tap=%d hold=%d retarget=%dms holdMs=%d combat=%d camera=%d lockKey=%d lockMode=%d yield=%d hostileList=%d return=%d vertical=%d switchMargin=%.0f tapKeys=%d holdKeys=%d lang=%d",
+		_MESSAGE("config (%s%s): enabled=%d logOnly=%d shape=%s range=%.0f cone=%.0f turn=%.0f smooth=%.1f update=%dms tap=%d hold=%d retarget=%dms holdMs=%d combat=%d lock=%d lockKey=%d lockMode=%d yield=%d hostileList=%d return=%d vertical=%d switchMargin=%.0f tapKeys=%d holdKeys=%d lang=%d",
 				 found ? "ini: " : "NO ini found, defaults; looked for: ", g_iniPath[0] ? g_iniPath : PLUGIN_INI_NAME,
 				 g_cfg.enabled, g_cfg.logOnly, g_cfg.shape ? "circle" : "cone", g_cfg.range, g_cfg.coneDeg,
 				 g_cfg.turnSpeedDeg, g_cfg.smoothing, g_cfg.updateMs, g_cfg.tapAssist, g_cfg.holdMode,
-				 g_cfg.retargetMs, g_cfg.holdMs, g_cfg.requireCombat, g_cfg.cameraMode, g_cfg.lockOnKey, g_cfg.lockOnMode,
+				 g_cfg.retargetMs, g_cfg.holdMs, g_cfg.requireCombat, g_cfg.lockEnabled, g_cfg.lockOnKey, g_cfg.lockOnMode,
 				 g_cfg.coeusYield, g_cfg.useHostileList, g_cfg.returnToHeading, g_cfg.verticalMode, g_cfg.switchMargin,
 				 g_numTapKeys, g_numHoldKeys, g_cfg.language);
 	}
@@ -321,6 +356,7 @@ namespace
 	bool			g_lockKeyState = false;
 	DWORD			g_lockNoEnemySince = 0;
 	volatile LONG	g_lockActive = 0;
+	volatile LONG	g_lockOwn = 0;			// 1 = o lock-on PROPRIO do mod esta ligado
 	// Com lock-on ativo o SoftTarget fica em pausa (modos 0 e 2); o modo 1 so vira o corpo.
 	bool LockPauses() { return g_lockActive && (g_cfg.lockOnMode == 0 || g_cfg.lockOnMode == 2); }
 
@@ -336,8 +372,6 @@ namespace
 
 	// Perfil escolhido no menu: true = TDM (movimento direcional do Coeus com armas na mao).
 	bool InCoeusProfile() { return g_cfg.profileMode == 1; }
-
-	int EffCameraMode() { return InCoeusProfile() ? 0 : g_cfg.cameraMode; }
 
 	// ------------------------------------------------------------------ funcoes nativas (menu)
 	const Opt * FindOpt(const char * key)
@@ -476,7 +510,7 @@ namespace
 			case 0: return InCoeusProfile() ? 2 : 1;
 			case 1: return g_sloIsLockOn ? 1 : 0;
 			case 2: return (g_coeusExternal || g_coeusDirActive) ? 1 : 0;
-			case 3: return g_lockActive ? 1 : 0;
+			case 3: return (g_lockActive || g_lockOwn) ? 1 : 0;
 		}
 		return 0;
 	}
@@ -501,11 +535,10 @@ namespace
 
 	// ------------------------------------------------------------------ escolha do alvo
 	UInt32 g_lastTargetId = 0;
-	volatile LONG	g_endReason = 0;		// por que a ultima sessao acabou: 0 tempo, 1 correr, 2 lock-on, 3 sem alvo
+	volatile LONG	g_endReason = 0;		// por que a ultima sessao acabou: 0 tempo, 1 correr, 2 lock-on externo, 3 sem alvo, 4 lock-on proprio desligado
 	volatile LONG	g_forceCircle = 0;	// 1 = ignora o cone (usado pela ajuda do lock-on)
 	volatile LONG	g_active	= 0;		// 1 = sessao de combate em curso (o corpo encara o alvo mais proximo)
 	volatile LONG	g_shiftHeld = 0;		// Shift (ou outra tecla de ShiftKeys) carregado
-	volatile LONG	g_remapActive = 0;		// 1 = W/A/S/D devem ser lidos relativos a tela (so a encarar o alvo no perfil TDM)
 	volatile DWORD	g_lastAttackTick = 0;	// ultimo toque de ataque
 
 	// Inimigos que o proprio jogo ja tem em combate com o jogador (PlayerCharacter::hostileHandles,
@@ -686,23 +719,499 @@ namespace
 		return want;
 	}
 
-	// Rotacao livre da camera: a mesma que o Coeus liga no TDM. Com o byte em 0xB4 ligado a camera fica em
-	// corpo + deslocamento (0xAC) e o rato muda so o deslocamento (o corpo nao roda com o rato).
-	// Devolve true se fomos nos a liga-la agora (a camera nao salta: o deslocamento parte da posicao atual).
-	bool EnsureFreeRot(UInt8 * cs, float bodyYaw)
+
+	// ------------------------------------------------------------------ botoes
+	bool	g_holdLeft = false, g_holdRight = false, g_holdExtra = false;
+	bool	g_kFwd = false, g_kBack = false, g_kLeft = false, g_kRight = false;
+	DWORD	g_lastHoldEvent = 0;
+	DWORD	g_lastScan = 0;
+
+	// ------------------------------------------------------------------ lock-on PROPRIO (F liga/desliga, M3 troca de alvo)
+	// Prende o alvo cujo CORPO INTEIRO (qualquer osso do esqueleto: pernas, asas, cauda, cabeca...) fica mais perto da
+	// mira, dentro ou fora do combate. Nao desenha reticula. Substitui o Simple Lock-On (nao usar os dois ao mesmo tempo).
+	volatile LONG	g_lockId = 0;				// formID do alvo preso
+	Actor *			g_lockActor = NULL;			// ponteiro do alvo (revalidado por varrimento a cada 250 ms)
+	volatile float	g_aimX = 0.0f, g_aimY = 0.0f, g_aimZ = 0.0f;	// ponto de mira (centro do corpo + previsao)
+	volatile LONG	g_assist = 0;				// 1 = a prever o disparo (arco / magia a ser usado)
+	DWORD			g_assistUntil = 0;
+	DWORD			g_lockLostSince = 0, g_lastResolve = 0, g_lastNodes = 0, g_lockPrevTick = 0;
+	float			g_lockOff[3] = { 0.0f, 0.0f, 80.0f };	// centro do corpo menos a posicao do ator
+	float			g_lockVel[3] = { 0.0f, 0.0f, 0.0f };	// velocidade estimada do alvo (unidades por segundo)
+	float			g_lockPrev[3] = { 0.0f, 0.0f, 0.0f };
+	int				g_camAxis = 1;				// eixo da camera que aponta para a frente (0..11), calibrado em terceira pessoa
+
+	bool IsFirstPerson()
 	{
-		if(*(cs + 0xB4)) return false;
-		*(float *)(cs + 0xAC) = WrapPi(*(float *)(cs + 0x5C) - bodyYaw);
-		*(cs + 0xB4) = 1;
+		PlayerCamera * cam = PlayerCamera::GetSingleton();
+		return cam && cam->cameraState && cam->cameraState->stateId == PlayerCamera::kCameraState_FirstPerson;
+	}
+
+	// Raio da mira: origem na camera, direcao para a frente. O eixo "frente" da matriz da camera e descoberto sozinho
+	// em terceira pessoa (o que melhor aponta da camera para o personagem) e fica guardado.
+	bool CameraRay(PlayerCharacter * player, float * o, float * d)
+	{
+		__try
+		{
+			PlayerCamera * cam = PlayerCamera::GetSingleton();
+			if(!cam || !cam->cameraNode) return false;
+			const NiTransform & t = cam->cameraNode->m_worldTransform;
+			o[0] = t.pos.x; o[1] = t.pos.y; o[2] = t.pos.z;
+
+			float cand[12][3];
+			for(int a = 0; a < 3; ++a)
+				for(int r = 0; r < 3; ++r)
+				{
+					cand[a][r]     =  t.rot.data[r][a];		// colunas
+					cand[a + 3][r] = -t.rot.data[r][a];
+					cand[a + 6][r] =  t.rot.data[a][r];		// linhas
+					cand[a + 9][r] = -t.rot.data[a][r];
+				}
+
+			if(ThirdPersonStatePtr())
+			{
+				const NiPoint3 pp = Engine::Position(player);
+				const float v[3] = { pp.x - o[0], pp.y - o[1], (pp.z + g_cfg.playerAimHeight) - o[2] };
+				const float len = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+				if(len > 60.0f)
+				{
+					float best = 0.0f, cur = -1.0f;
+					int bi = -1;
+					for(int k = 0; k < 12; ++k)
+					{
+						const float dp = (cand[k][0] * v[0] + cand[k][1] * v[1] + cand[k][2] * v[2]) / len;
+						if(k == g_camAxis) cur = dp;
+						if(dp > best) { best = dp; bi = k; }
+					}
+					if(bi >= 0 && bi != g_camAxis && best > 0.8f && best > cur + 0.02f)
+					{
+						g_camAxis = bi;
+						_MESSAGE("lock: camera forward axis calibrated (candidate %d, match %.2f)", bi, best);
+					}
+				}
+			}
+
+			const float dx = cand[g_camAxis][0], dy = cand[g_camAxis][1], dz = cand[g_camAxis][2];
+			const float dl = sqrtf(dx * dx + dy * dy + dz * dz);
+			if(dl < 0.5f) return false;
+			d[0] = dx / dl; d[1] = dy / dl; d[2] = dz / dl;
+			return true;
+		}
+		__except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+	}
+
+	// Angulo (radianos) entre o raio da mira e o ponto p.
+	float AngleToRay(const float * o, const float * d, float px, float py, float pz)
+	{
+		const float vx = px - o[0], vy = py - o[1], vz = pz - o[2];
+		const float len = sqrtf(vx * vx + vy * vy + vz * vz);
+		if(len < 1.0f) return 0.0f;
+		float c = (vx * d[0] + vy * d[1] + vz * d[2]) / len;
+		if(c >  1.0f) c =  1.0f;
+		if(c < -1.0f) c = -1.0f;
+		return acosf(c);
+	}
+
+	// Posicao de cada no do esqueleto do ator (o "corpo"): devolve quantos pontos escreveu em pts (x,y,z).
+	int CollectPoints(Actor * actor, float * pts, int maxPts)
+	{
+		NiNode * root = actor->GetNiNode();
+		if(!root) return 0;
+		const NiPoint3 pos = Engine::Position(actor);
+		NiNode * stack[96];
+		int sp = 0, n = 0, visited = 0;
+		stack[sp++] = root;
+		while(sp > 0 && n < maxPts && visited < 700)
+		{
+			NiNode * nd = stack[--sp];
+			++visited;
+			const NiPoint3 & p = nd->m_worldTransform.pos;
+			const float ex = p.x - pos.x, ey = p.y - pos.y, ez = p.z - pos.z;
+			if(ex * ex + ey * ey + ez * ez < 2000.0f * 2000.0f)			// ignora nos perdidos na origem do mundo
+			{
+				pts[n * 3] = p.x; pts[n * 3 + 1] = p.y; pts[n * 3 + 2] = p.z;
+				++n;
+			}
+			const NiTArray<NiAVObject *> & ch = nd->m_children;
+			for(UInt16 i = 0; i < ch.m_emptyRunStart; ++i)
+			{
+				NiAVObject * c = ch.m_data[i];
+				if(!c) continue;
+				NiNode * cn = c->GetAsNiNode();
+				if(cn && sp < 96) stack[sp++] = cn;
+			}
+		}
+		return n;
+	}
+
+	// Avalia o corpo do ator: angulo minimo entre a mira e qualquer ponto do corpo, e o centro do corpo.
+	bool EvalBody(Actor * actor, const float * o, const float * d, float * outAngle, float * outCenter)
+	{
+		float pts[3 * 256];
+		const NiPoint3 pos = Engine::Position(actor);
+		int n = CollectPoints(actor, pts, 256);
+		if(n < 3)
+		{
+			// Sem esqueleto utilizavel: usa so os pes e a altura de mira.
+			pts[0] = pos.x; pts[1] = pos.y; pts[2] = pos.z;
+			pts[3] = pos.x; pts[4] = pos.y; pts[5] = pos.z + g_cfg.aimHeight;
+			n = 2;
+		}
+		float minA = 10.0f, cx = 0.0f, cy = 0.0f, cz = 0.0f;
+		for(int i = 0; i < n; ++i)
+		{
+			const float a = AngleToRay(o, d, pts[i * 3], pts[i * 3 + 1], pts[i * 3 + 2]);
+			if(a < minA) minA = a;
+			cx += pts[i * 3]; cy += pts[i * 3 + 1]; cz += pts[i * 3 + 2];
+		}
+		*outAngle = minA;
+		outCenter[0] = cx / n; outCenter[1] = cy / n; outCenter[2] = cz / n;
 		return true;
 	}
 
-	// O corpo girou 'step': tira-se o mesmo ao deslocamento e a camera fica parada.
-	void CameraHold(UInt8 * cs, float step)
+	// Atores a considerar: os da celula atual e os que o jogo lista como hostis (mesmo noutra celula).
+	int GatherActors(PlayerCharacter * player, Actor ** out, int maxN, UInt32 * hostileIds, UInt32 * hostileHandles, int * hostileCount)
 	{
-		if(!cs) return;
-		float * off = (float *)(cs + 0xAC);
-		*off = WrapPi(*off - step);
+		int n = 0;
+		const int hc = CollectHostileIds(player, hostileIds, hostileHandles, 64);
+		if(hostileCount) *hostileCount = hc;
+
+		TESObjectCELL * cell = Engine::ParentCell(player);
+		if(cell)
+		{
+			const UInt32 * raw = (const UInt32 *)&cell->objectList;
+			TESObjectREFR ** items = (TESObjectREFR **)raw[0];
+			UInt32 count = (raw[1] < raw[2]) ? raw[1] : raw[2];
+			if(items && count > 0)
+			{
+				if(count > 20000) count = 20000;
+				for(UInt32 i = 0; i < count && n < maxN; ++i)
+				{
+					TESObjectREFR * ref = items[i];
+					if(!ref || ref == (TESObjectREFR *)player) continue;
+					if(ref->formType != kFormType_Character) continue;
+					Actor * a = DYNAMIC_CAST(ref, TESObjectREFR, Actor);
+					if(a) out[n++] = a;
+				}
+			}
+		}
+
+		for(int j = 0; j < hc && n < maxN; ++j)
+		{
+			UInt32 h = hostileHandles[j];
+			TESObjectREFR * ref = NULL;
+			if(h && LookupREFRByHandle(&h, &ref) && ref)
+			{
+				Actor * a = DYNAMIC_CAST(ref, TESObjectREFR, Actor);
+				ref->handleRefObject.DecRefHandle();
+				if(a && a != (Actor *)player)
+				{
+					bool dup = false;
+					for(int k = 0; k < n; ++k) if(out[k] == a) { dup = true; break; }
+					if(!dup) out[n++] = a;
+				}
+			}
+		}
+		return n;
+	}
+
+	bool LockEligible(Actor * a, PlayerCharacter * player, const UInt32 * hid, int hc)
+	{
+		const UInt32 life = Engine::LifeState(a);
+		if(life != 0 && !(g_cfg.allowReanimated && life == 4)) return false;
+		if(!a->GetNiNode()) return false;							// sem corpo carregado
+		if(g_cfg.lockHostileOnly)
+		{
+			bool listed = false;
+			for(int j = 0; j < hc; ++j) if(hid[j] == a->formID) { listed = true; break; }
+			if(!listed && !CALL_MEMBER_FN(a, IsHostileToActor)((Actor *)player)) return false;
+		}
+		return true;
+	}
+
+	// mode 0 = o corpo mais perto da mira (centro do ecra); mode 1 = o mais perto do jogador. excludeId: ignora esse alvo.
+	Actor * PickTarget(PlayerCharacter * player, int mode, UInt32 excludeId, float * outAngle)
+	{
+		float o[3], d[3];
+		if(!CameraRay(player, o, d)) return NULL;
+
+		Actor * list[512];
+		UInt32 hid[64], hh[64];
+		int hc = 0;
+		const int n = GatherActors(player, list, 512, hid, hh, &hc);
+
+		const NiPoint3 me = Engine::Position(player);
+		const float acquireRad = g_cfg.lockAcquireDeg * kPi / 180.0f;
+		Actor * best = NULL;
+		float bestScore = 1e30f, bestAng = 0.0f;
+
+		for(int i = 0; i < n; ++i)
+		{
+			Actor * a = list[i];
+			if(!a || a->formID == excludeId) continue;
+			const NiPoint3 pos = Engine::Position(a);
+			const float dx = pos.x - me.x, dy = pos.y - me.y, dz = pos.z - me.z;
+			const float dist = sqrtf(dx * dx + dy * dy + dz * dz);
+			if(dist > g_cfg.lockRange) continue;
+			if(!LockEligible(a, player, hid, hc)) continue;
+
+			float score, ang = 0.0f;
+			if(mode == 0)
+			{
+				// Pre-filtro barato (o corpo pode ser grande: margem larga) antes de percorrer o esqueleto.
+				if(AngleToRay(o, d, pos.x, pos.y, pos.z + 80.0f) > acquireRad + 1.2f) continue;
+				float c[3];
+				if(!EvalBody(a, o, d, &ang, c)) continue;
+				if(ang > acquireRad) continue;
+				score = ang + dist * 0.00001f;						// empate: o mais perto
+			}
+			else score = dist;
+
+			if(score < bestScore) { bestScore = score; best = a; bestAng = ang; }
+		}
+		if(outAngle) *outAngle = bestAng;
+		return best;
+	}
+
+	Actor * SafePickTarget(PlayerCharacter * player, int mode, UInt32 excludeId, float * outAngle)
+	{
+		__try { return PickTarget(player, mode, excludeId, outAngle); }
+		__except(EXCEPTION_EXECUTE_HANDLER) { return NULL; }
+	}
+
+	void LockSetTarget(Actor * a, const char * what, float angleDeg)
+	{
+		const DWORD now = GetTickCount();
+		g_lockActor = a;
+		g_lockId = (LONG)a->formID;
+		g_lockOwn = 1;
+		g_lockLostSince = 0;
+		g_lastResolve = now - 1000;		// revalida ja no 1o passo (precisa do handle para o Coeus)
+		g_lastNodes = 0;
+		g_lockPrevTick = 0;
+		g_lockVel[0] = g_lockVel[1] = g_lockVel[2] = 0.0f;
+		g_lastTargetId = a->formID;
+		g_targetHandle = 0;
+		g_endTick = now + 1000;
+		g_active = 1;
+		if(angleDeg >= 0.0f) _MESSAGE("lock: %s formID %08X (%.1f deg from the crosshair)", what, a->formID, angleDeg);
+		else				 _MESSAGE("lock: %s formID %08X", what, a->formID);
+	}
+
+	void LockOff(const char * why)
+	{
+		if(!g_lockOwn) return;
+		g_lockOwn = 0;
+		g_lockActor = NULL;
+		g_lockId = 0;
+		g_assist = 0;
+		g_targetHandle = 0;
+		g_endReason = 4;
+		g_active = 0;
+		_MESSAGE("lock: OFF (%s)", why);
+	}
+
+	bool MenuBlocksInput()
+	{
+		__try
+		{
+			MenuManager * mm = MenuManager::GetSingleton();
+			UIStringHolder * ui = UIStringHolder::GetSingleton();
+			if(!mm || !ui) return false;
+			BSFixedString * names[] =
+			{
+				&ui->inventoryMenu, &ui->console, &ui->dialogueMenu, &ui->mainMenu, &ui->magicMenu, &ui->tweenMenu,
+				&ui->barterMenu, &ui->giftMenu, &ui->mapMenu, &ui->lockpickingMenu, &ui->statsMenu, &ui->containerMenu,
+				&ui->sleepWaitMenu, &ui->journalMenu, &ui->bookMenu, &ui->favoritesMenu, &ui->loadingMenu
+			};
+			for(int i = 0; i < (int)(sizeof(names) / sizeof(names[0])); ++i)
+				if(mm->IsMenuOpen(names[i])) return true;
+		}
+		__except(EXCEPTION_EXECUTE_HANDLER) { }
+		return false;
+	}
+
+	// Tecla F (liga/desliga) - chamada pelo recetor de teclas.
+	void LockToggle()
+	{
+		PlayerCharacter * player = Engine::Player();
+		if(!player) return;
+		if(g_lockOwn) { LockOff("key pressed"); return; }
+		if(g_lockActive) { _MESSAGE("lock: another lock-on (LockOn.dll) is active - remove it, this mod replaces it"); return; }
+
+		float ang = 0.0f;
+		Actor * a = SafePickTarget(player, 0, 0, &ang);
+		if(!a) { _MESSAGE("lock: no target near the crosshair (range %.0f, area %.0f deg)", g_cfg.lockRange, g_cfg.lockAcquireDeg); return; }
+		LockSetTarget(a, "ON, target", ang * 180.0f / kPi);
+	}
+
+	// Tecla M3 (troca de alvo): o corpo mais perto do centro do ecra, sem contar o atual.
+	void LockSwitch()
+	{
+		if(!g_lockOwn) return;
+		PlayerCharacter * player = Engine::Player();
+		if(!player) return;
+		float ang = 0.0f;
+		Actor * a = SafePickTarget(player, 0, (UInt32)g_lockId, &ang);
+		if(!a) { _MESSAGE("lock: no other target near the crosshair"); return; }
+		LockSetTarget(a, "switched to", ang * 180.0f / kPi);
+	}
+
+	void LockLoseOrNext(PlayerCharacter * player, const char * why)
+	{
+		if(g_cfg.lockAutoNext)
+		{
+			Actor * a = SafePickTarget(player, 1, (UInt32)g_lockId, NULL);
+			if(a) { _MESSAGE("lock: %s - going to the nearest enemy", why); LockSetTarget(a, "auto-next", -1.0f); return; }
+		}
+		LockOff(why);
+	}
+
+	// A usar arco / besta / magia com um botao de ataque carregado? (sem funcoes do SKSE: leitura direta)
+	bool RangedHeld(PlayerCharacter * player)
+	{
+		ActorProcessManager * pm = player->processManager;
+		if(!pm) return false;
+		const bool anyHeld = g_holdLeft || g_holdRight;
+		for(int h = 0; h < 2; ++h)
+		{
+			TESForm * f = pm->equippedObject[h];			// 0 = mao esquerda, 1 = direita
+			if(!f) continue;
+			if(f->formType == kFormType_Weapon)
+			{
+				const UInt8 type = ((TESObjectWEAP *)f)->gameData.type;
+				if((type == TESObjectWEAP::GameData::kType_Bow || type == TESObjectWEAP::GameData::kType_CrossBow) && anyHeld) return true;
+			}
+			else if(f->formType == kFormType_Spell)
+			{
+				if((h == 0 && g_holdLeft) || (h == 1 && g_holdRight)) return true;
+			}
+		}
+		return false;
+	}
+
+	// Um passo do lock-on proprio (corre na thread de rotacao): valida o alvo, calcula o ponto de mira e a previsao.
+	void LockTick(PlayerCharacter * player, DWORD now)
+	{
+		if(!g_lockOwn) return;
+
+		// 1) revalidar o ponteiro do alvo (varrimento a cada 250 ms)
+		if(!g_lockActor || (LONG)(now - g_lastResolve) > 250)
+		{
+			g_lastResolve = now;
+			Actor * list[512];
+			UInt32 hid[64], hh[64];
+			int hc = 0;
+			const int n = GatherActors(player, list, 512, hid, hh, &hc);
+			Actor * f = NULL;
+			for(int i = 0; i < n; ++i) if(list[i] && list[i]->formID == (UInt32)g_lockId) { f = list[i]; break; }
+			if(!f) { LockOff("target left the area"); return; }
+			g_lockActor = f;
+			g_targetHandle = 0;
+			for(int j = 0; j < hc; ++j) if(hid[j] == f->formID) { g_targetHandle = (LONG)hh[j]; break; }
+		}
+
+		Actor * a = g_lockActor;
+		if(!a || a->formID != (UInt32)g_lockId) { g_lockActor = NULL; return; }
+
+		const UInt32 life = Engine::LifeState(a);
+		if(life != 0 && !(g_cfg.allowReanimated && life == 4)) { LockLoseOrNext(player, "target died"); return; }
+
+		const NiPoint3 pos = Engine::Position(a);
+		const NiPoint3 me = Engine::Position(player);
+		const float ex = pos.x - me.x, ey = pos.y - me.y, ez = pos.z - me.z;
+		const float dist3 = sqrtf(ex * ex + ey * ey + ez * ez);
+		if(dist3 > g_cfg.lockRange * 1.25f) { LockOff("target too far"); return; }
+
+		// 2) corpo do alvo e visibilidade (a cada 60 ms)
+		if((LONG)(now - g_lastNodes) >= 60)
+		{
+			g_lastNodes = now;
+			float o[3], d[3];
+			if(CameraRay(player, o, d))
+			{
+				float ang = kPi, c[3];
+				if(EvalBody(a, o, d, &ang, c))
+				{
+					g_lockOff[0] = c[0] - pos.x; g_lockOff[1] = c[1] - pos.y; g_lockOff[2] = c[2] - pos.z;
+				}
+				const bool visible = ang <= g_cfg.lockLoseAngleDeg * kPi / 180.0f;
+				if(visible) g_lockLostSince = 0;
+				else if(!g_lockLostSince) g_lockLostSince = now;
+				else if((LONG)(now - g_lockLostSince) > g_cfg.lockLoseSightMs)
+				{
+					_MESSAGE("lock: target %.0f deg away from the view for %d ms", ang * 180.0f / kPi, g_cfg.lockLoseSightMs);
+					LockOff("target out of sight");
+					return;
+				}
+			}
+		}
+
+		// 3) velocidade do alvo (a cada 100 ms, suavizada)
+		if(!g_lockPrevTick)
+		{
+			g_lockPrev[0] = pos.x; g_lockPrev[1] = pos.y; g_lockPrev[2] = pos.z;
+			g_lockPrevTick = now;
+		}
+		else if((LONG)(now - g_lockPrevTick) >= 100)
+		{
+			const float s = (now - g_lockPrevTick) / 1000.0f;
+			float nv[3] = { (pos.x - g_lockPrev[0]) / s, (pos.y - g_lockPrev[1]) / s, (pos.z - g_lockPrev[2]) / s };
+			if(sqrtf(nv[0] * nv[0] + nv[1] * nv[1] + nv[2] * nv[2]) > 4000.0f) nv[0] = nv[1] = nv[2] = 0.0f;	// salto/teleporte
+			for(int k = 0; k < 3; ++k) g_lockVel[k] = g_lockVel[k] * 0.5f + nv[k] * 0.5f;
+			g_lockPrev[0] = pos.x; g_lockPrev[1] = pos.y; g_lockPrev[2] = pos.z;
+			g_lockPrevTick = now;
+		}
+
+		// 4) ponto de mira e previsao do disparo
+		float ax = pos.x + g_lockOff[0], ay = pos.y + g_lockOff[1], az = pos.z + g_lockOff[2];
+
+		if(RangedHeld(player)) g_assistUntil = now + 350;		// o disparo sai ao SOLTAR: mantem a ajuda um instante
+		const bool assist = ((LONG)(g_assistUntil - now) > 0);
+		g_assist = assist ? 1 : 0;
+		if(assist && g_cfg.predictEnabled)
+		{
+			const float fx = ax - me.x, fy = ay - me.y, fz = az - (me.z + g_cfg.playerAimHeight);
+			const float dist = sqrtf(fx * fx + fy * fy + fz * fz);
+			if(dist > g_cfg.predictMinDist)
+			{
+				float t = dist / g_cfg.projectileSpeed;
+				if(t > 3.0f) t = 3.0f;
+				const float k = g_cfg.predictStrength / 100.0f;
+				ax += g_lockVel[0] * t * k;
+				ay += g_lockVel[1] * t * k;
+				az += g_lockVel[2] * t * k + 0.5f * g_cfg.projectileGravity * t * t;
+				if(g_cfg.verbose)
+					_MESSAGE("predict: dist %.0f t %.2fs lead (%.0f, %.0f, %.0f)", dist, t, g_lockVel[0] * t * k, g_lockVel[1] * t * k, g_lockVel[2] * t * k);
+			}
+		}
+		g_aimX = ax; g_aimY = ay; g_aimZ = az;
+
+		// 5) guinada e inclinacao que o corpo (e a camera) devem tomar
+		const float hx = ax - me.x, hy = ay - me.y;
+		const float hd = sqrtf(hx * hx + hy * hy);
+		const float limitRad = g_cfg.verticalLimitDeg * kPi / 180.0f;
+		float up = atan2f(az - (me.z + g_cfg.playerAimHeight), hd > 1.0f ? hd : 1.0f);
+		if(up >  limitRad) up =  limitRad;
+		if(up < -limitRad) up = -limitRad;
+		g_targetYaw = atan2f(hx, hy);
+		g_targetPitchUp = up;
+		g_hasPitch = 1;
+		g_lastTargetId = a->formID;
+		g_active = 1;
+		g_endTick = now + 1000;
+	}
+
+	void SafeLockTick(PlayerCharacter * player, DWORD now)
+	{
+		__try { LockTick(player, now); }
+		__except(EXCEPTION_EXECUTE_HANDLER) { g_lockActor = NULL; }
+	}
+
+	bool MatchKey(UInt32 device, int code, int cfgCode)
+	{
+		if(cfgCode <= 0) return false;
+		if(cfgCode >= 256) return device == kDeviceType_Mouse && (code + 256 == cfgCode || code == cfgCode);
+		return device == kDeviceType_Keyboard && code == cfgCode;
 	}
 
 	// ---- ajuda do lock-on: trocar para o inimigo mais proximo
@@ -761,7 +1270,7 @@ namespace
 		int   phase = 0;					// 0 = parado, 1 = a seguir o alvo, 2 = a regressar (rumo e/ou inclinacao)
 		float homeYaw = 0.0f, homePitch = 0.0f;
 		DWORD returnStart = 0, lastYield = 0, lastRetarget = 0, noTargetSince = 0;
-		bool  yielding = false, returnYaw = false, weSetFlag = false, prevActive = false;
+		bool  yielding = false, returnYaw = false, prevActive = false, tiltUsed = false;
 		int   lastProfile = -1;
 		DWORD lastAssist = 0, lastSwitch = 0, keyAt = 0;
 		int   attempts = 0;
@@ -775,8 +1284,8 @@ namespace
 			last = now;
 			if(dt > 0.1f) dt = 0.1f;
 
-			// A sessao acaba quando passa o tempo sem novos botoes.
-			if(g_active && (LONG)(now - g_endTick) >= 0) { g_endReason = 0; g_active = 0; }
+			// A sessao acaba quando passa o tempo sem novos botoes (o lock-on proprio nao tem tempo limite).
+			if(g_active && !g_lockOwn && (LONG)(now - g_endTick) >= 0) { g_endReason = 0; g_active = 0; }
 
 			PlayerCharacter * player = Engine::Player();
 			if(!player) { phase = 0; continue; }
@@ -789,9 +1298,19 @@ namespace
 			}
 
 			// Correr (Shift + andar) = fugir: a sessao acaba e o corpo volta a ser do jogador / do Coeus.
-			if(g_active && g_shiftHeld && g_moveHeld) { g_endReason = 1; g_active = 0; phase = 0; }
+			// Com o lock-on proprio o lock continua, mas o corpo e a camera deixam de ser puxados enquanto corre.
+			bool sprintHold = false;
+			if(g_active && g_shiftHeld && g_moveHeld)
+			{
+				if(g_lockOwn) sprintHold = true;
+				else { g_endReason = 1; g_active = 0; phase = 0; }
+			}
 
-			// Lock-on ativo (SoftTarget em pausa): larga tudo, sem regressar ao rumo antigo.
+			// Outro lock-on (LockOn.dll) assumiu: o nosso larga.
+			if(g_lockOwn && g_lockActive) LockOff("another lock-on took over");
+			if(!g_cfg.lockEnabled && g_lockOwn) LockOff("lock-on disabled in the menu");
+
+			// Lock-on externo ativo (SoftTarget em pausa): larga tudo, sem regressar ao rumo antigo.
 			if(LockPauses()) { phase = 0; if(g_active) g_endReason = 2; g_active = 0; }
 
 			// Lock-on assistido (LockOnMode=2): se o lock-on esta num inimigo que nao e o mais proximo,
@@ -826,8 +1345,11 @@ namespace
 				else if(ok && nid == lockId) attempts = 0;
 			}
 
+			// Lock-on proprio: valida o alvo e calcula o ponto de mira.
+			if(g_lockOwn) SafeLockTick(player, now);
+
 			// Durante a sessao o alvo mais proximo e reavaliado aqui, mesmo sem carregar em nada.
-			if(g_active && !g_cfg.logOnly && now - lastRetarget >= (DWORD)g_cfg.retargetMs)
+			if(g_active && !g_lockOwn && !g_cfg.logOnly && now - lastRetarget >= (DWORD)g_cfg.retargetMs)
 			{
 				lastRetarget = now;
 				float ty = 0.0f, tp = 0.0f;
@@ -851,22 +1373,22 @@ namespace
 			// Registo: inicio e fim de cada sessao de combate (e o motivo do fim).
 			if(g_active && !prevActive)
 			{
-				UInt8 * c0 = ThirdPersonStatePtr();
-				_MESSAGE("session start: profile=%s target=%08X handle=%08X freeRot=%d camOffset=%.2f", coeusProfile ? "TDM" : "normal", g_lastTargetId, (UInt32)g_targetHandle, c0 ? (int)*(c0 + 0xB4) : -1, c0 ? *(float *)(c0 + 0xAC) : 0.0f);
+				_MESSAGE("session start: profile=%s target=%08X handle=%08X%s", coeusProfile ? "TDM" : "normal", g_lastTargetId, (UInt32)g_targetHandle, g_lockOwn ? " (own lock-on)" : "");
 			}
 			else if(!g_active && prevActive)
 			{
-				static const char * why[] = { "timeout", "sprint", "lock-on active", "no target in range" };
-				_MESSAGE("session end: %s", why[(g_endReason >= 0 && g_endReason < 4) ? g_endReason : 0]);
+				static const char * why[] = { "timeout", "sprint", "external lock-on active", "no target in range", "own lock-on off" };
+				_MESSAGE("session end: %s", why[(g_endReason >= 0 && g_endReason < 5) ? g_endReason : 0]);
 			}
 			prevActive = (g_active != 0);
 
 			// Perfil TDM sem "encarar o alvo": enquanto anda o corpo e do Coeus; so ha um "pulso" depois de cada ataque.
-			const bool suppress = coeusProfile && !g_cfg.coeusYield && g_moveHeld && (now - g_lastAttackTick) >= (DWORD)g_cfg.attackPulseMs;
+			// (O lock-on proprio nao usa o pulso: o corpo encara sempre o alvo preso.)
+			const bool suppress = !g_lockOwn && coeusProfile && !g_cfg.coeusYield && g_moveHeld && (now - g_lastAttackTick) >= (DWORD)g_cfg.attackPulseMs;
 
 			// Perfil TDM a encarar o alvo: pede ao Coeus para largar o corpo (so com handle valido, para nao
 			// deixar o Coeus/LockOn num estado de lock-on "fantasma").
-			const bool wantYield = g_cfg.coeusYield && coeusProfile && g_coeusExternal && g_active && !suppress && !g_lockActive && g_targetHandle != 0;
+			const bool wantYield = g_cfg.coeusYield && coeusProfile && g_coeusExternal && g_active && !suppress && !sprintHold && !g_lockActive && g_targetHandle != 0;
 			if(wantYield)
 			{
 				if(!yielding || now - lastYield > 150)
@@ -887,50 +1409,65 @@ namespace
 				_MESSAGE("coeus: external lock-on OFF");
 				yielding = false;
 			}
-			g_remapActive = (wantYield && g_cfg.screenRelativeMove) ? 1 : 0;
 
-			// Camera. A camera "fica parada" (rotacao livre ligada por nos, com o deslocamento a compensar o giro do corpo) quando:
-			//  - o Coeus largou o corpo (perfil TDM a encarar o alvo), para a camera continuar livre como no TDM;
-			//  - o perfil normal tem CameraMode=1;
-			//  - Shift esta carregado com a sessao ativa (camera livre: o rato move so a camera; o corpo fica no alvo).
-			// Fora disso a camera acompanha o corpo (comportamento do jogo).
-			const bool freeCam = !coeusProfile && g_cfg.freeCamEnabled && g_shiftHeld && !g_moveHeld && g_active;
-			const bool hold = g_active && !suppress && !g_lockActive && (wantYield || EffCameraMode() >= 1 || freeCam);
-			UInt8 * cs = (hold || weSetFlag) ? ThirdPersonStatePtr() : NULL;
 			NiPoint3 & rot = Engine::Rotation(player);
 			const float maxRad = g_cfg.turnSpeedDeg * kPi / 180.0f;
 			const float limitRad = g_cfg.verticalLimitDeg * kPi / 180.0f;
 			const float vSign = g_cfg.verticalInvert ? -1.0f : 1.0f;
 			const bool returnAllowed = g_cfg.returnToHeading && !coeusProfile;
+			const bool firstPerson = IsFirstPerson();
+			// Inclinar o corpo (bracos): pela opcao de mira vertical, ou com o lock-on proprio a prever um disparo / em primeira pessoa.
+			const bool useTilt = g_hasPitch && ((g_cfg.verticalMode & 1) || (g_lockOwn && (g_assist || firstPerson)));
 
-			if(hold && cs && EnsureFreeRot(cs, rot.z))
-			{
-				weSetFlag = true;
-				_MESSAGE("camera: free rotation ON (offset %.2f)", *(float *)(cs + 0xAC));
-			}
-
-			if(g_active && !suppress)
+			if(g_active && !suppress && !sprintHold)
 			{
 				if(phase == 0)
 				{
 					// Inicio da sessao: guarda de onde partimos (rumo e inclinacao do corpo).
 					homeYaw = rot.z;
 					homePitch = rot.x;
+					tiltUsed = false;
 					phase = 1;
 				}
 				else if(phase == 2) phase = 1;
 
 				const float stepYaw = StepToward(rot.z, g_targetYaw, true, dt, maxRad, g_cfg.smoothing);
 				rot.z = WrapPi(rot.z + stepYaw);
-				if(hold) CameraHold(cs, stepYaw);
 
-				// Mira vertical: so o corpo (bracos); a camera nunca e tocada.
-				if(g_hasPitch && (g_cfg.verticalMode & 1))
+				// Mira vertical: so o corpo (bracos).
+				if(useTilt)
 				{
 					float up = g_targetPitchUp;
 					if(up >  limitRad) up =  limitRad;
 					if(up < -limitRad) up = -limitRad;
 					rot.x += StepToward(rot.x, -up * vSign, false, dt, maxRad, g_cfg.smoothing);	// positivo = olhar para baixo
+					if(!firstPerson) tiltUsed = true;		// em primeira pessoa rot.x e a propria vista: nao se repoe
+				}
+
+				// Lock-on proprio, perfil normal: a camera acompanha o alvo (so quando o jogo a deixa seguir o corpo).
+				if(g_lockOwn && !coeusProfile && g_cfg.lockCameraFollow)
+				{
+					UInt8 * cs = ThirdPersonStatePtr();
+					if(cs && !*(cs + 0xB4))
+					{
+						float cy = *(float *)(cs + 0x5C);
+						cy = WrapPi(cy + StepToward(cy, g_targetYaw, true, dt, maxRad, g_cfg.lockCameraSmooth));
+						*(float *)(cs + 0x5C) = cy;
+						*(float *)(cs + 0x60) = cy;
+
+						float o[3], dd[3];
+						if(g_cfg.lockCameraPitch && CameraRay(player, o, dd))
+						{
+							const float hx = g_aimX - o[0], hy = g_aimY - o[1];
+							float want = -atan2f(g_aimZ - o[2], sqrtf(hx * hx + hy * hy) > 1.0f ? sqrtf(hx * hx + hy * hy) : 1.0f);
+							if(want >  1.1f) want =  1.1f;
+							if(want < -1.1f) want = -1.1f;
+							float cp = *(float *)(cs + 0x54);
+							cp += StepToward(cp, want, false, dt, maxRad, g_cfg.lockCameraSmooth);
+							*(float *)(cs + 0x54) = cp;
+							*(float *)(cs + 0x58) = cp;
+						}
+					}
 				}
 			}
 			else if(!g_active && phase == 1)
@@ -938,7 +1475,7 @@ namespace
 				// A sessao acabou: o corpo repoe a inclinacao (sempre) e, se pedido, o rumo (so perfil normal,
 				// e nunca contra as teclas de andar).
 				const bool needYaw = returnAllowed && !g_moveHeld;
-				const bool needPitch = g_hasPitch && (g_cfg.verticalMode & 1) && fabsf(homePitch - rot.x) > 0.02f;
+				const bool needPitch = tiltUsed && fabsf(homePitch - rot.x) > 0.02f;
 				if(needYaw || needPitch) { phase = 2; returnStart = now; returnYaw = needYaw; }
 				else phase = 0;
 			}
@@ -955,38 +1492,13 @@ namespace
 					rot.z = WrapPi(rot.z + stepYaw);
 					if(fabsf(WrapPi(homeYaw - rot.z)) >= 0.01f) done = false;
 				}
-				if(g_cfg.verticalMode & 1)
+				if(tiltUsed)
 				{
 					rot.x += StepToward(rot.x, homePitch, false, dt, returnRad, g_cfg.returnSmoothing);
 					if(fabsf(homePitch - rot.x) >= 0.01f) done = false;
 				}
 
-				if(done || (LONG)(now - returnStart) >= 6000) phase = 0;
-			}
-
-			// Fim da camera parada: no perfil normal a camera volta devagar para tras do personagem (deslocamento -> 0)
-			// e a rotacao livre e desligada; no perfil TDM o Coeus retoma a camera tal como esta.
-			if(weSetFlag && !hold)
-			{
-				if(coeusProfile || g_lockActive)
-				{
-					weSetFlag = false;
-					_MESSAGE("camera: free rotation handed over");
-				}
-				else if(cs)
-				{
-					float * off = (float *)(cs + 0xAC);
-					const float st = StepToward(*off, 0.0f, true, dt, 4.2f, g_cfg.freeCamSmoothing);	// ~240 graus/s no maximo
-					*off = WrapPi(*off + st);
-					if(fabsf(*off) < 0.01f)
-					{
-						*off = 0.0f;
-						*(cs + 0xB4) = 0;
-						weSetFlag = false;
-						_MESSAGE("camera: free rotation OFF (camera is behind the character again)");
-					}
-				}
-				else if(!ThirdPersonStatePtr()) weSetFlag = false;
+				if(done || (LONG)(now - returnStart) >= 6000) { phase = 0; tiltUsed = false; }
 			}
 		}
 		return 0;
@@ -1081,9 +1593,9 @@ namespace
 			UInt8 * c1 = ThirdPersonStatePtr();
 			if(c1) { frFlag = (int)*(c1 + 0xB4); frOff = *(float *)(c1 + 0xAC); camYawV = *(float *)(c1 + 0x5C); }
 		}
-		_MESSAGE("probe: state=%u camDist=%.1f fov=%.1f | player rotZ=%.3f rotX=%.3f | camYaw=%.3f freeRot=%d offset=%.3f | lock: ours=%d slo=%d coeusLock=%d coeusExt=%d | active=%d move=%d shift=%d",
+		_MESSAGE("probe: state=%u camDist=%.1f fov=%.1f | player rotZ=%.3f rotX=%.3f | camYaw=%.3f freeRot=%d offset=%.3f | lock: ours=%d slo=%d coeusLock=%d coeusExt=%d | active=%d move=%d shift=%d own=%d",
 				 st ? (unsigned)st->stateId : 0xFFFFu, camDist, fov, rot.z, rot.x, camYawV, frFlag, frOff,
-				 (int)g_lockActive, sloNow, cLock, cExt, (int)g_active, (int)g_moveHeld, (int)g_shiftHeld);
+				 (int)g_lockActive, sloNow, cLock, cExt, (int)g_active, (int)g_moveHeld, (int)g_shiftHeld, (int)g_lockOwn);
 
 		if(st)
 		{
@@ -1103,11 +1615,6 @@ namespace
 		}
 	}
 
-	// ------------------------------------------------------------------ botoes
-	bool	g_holdLeft = false, g_holdRight = false, g_holdExtra = false;
-	bool	g_kFwd = false, g_kBack = false, g_kLeft = false, g_kRight = false;
-	DWORD	g_lastHoldEvent = 0;
-	DWORD	g_lastScan = 0;
 
 	bool InList(const int * list, int n, int code)
 	{
@@ -1125,127 +1632,11 @@ namespace
 		AcquireAndTurn(g_cfg.holdMs, true);
 	}
 
-	// ---- movimento relativo a tela (perfil TDM a encarar o alvo)
-	// Um 1o recetor, colocado ANTES dos do jogo, troca o controlo das teclas W/A/S/D por uma rotacao de 90 graus
-	// escolhida pela diferenca entre a camera e o corpo; o recetor normal (ultimo) repoe os nomes originais.
-	const int kMaxRewrite = 16;
-	ButtonEvent *	g_rwEvent[kMaxRewrite];
-	const char *	g_rwOrig[kMaxRewrite];
-	int				g_rwCount = 0;
-	int				g_mapK[4]		= { 0, 0, 0, 0 };
-	bool			g_mapActive[4]	= { false, false, false, false };
-	bool			g_remapReady	= false;
-
-	void RestoreRewritten()
-	{
-		for(int i = 0; i < g_rwCount; ++i)
-			*(const char **)&g_rwEvent[i]->controlID = g_rwOrig[i];
-		g_rwCount = 0;
-	}
-
-	// Rumo (guinada) da camera: da camera para o jogador.
-	bool CameraHeading(PlayerCharacter * player, float * outYaw)
-	{
-		__try
-		{
-			PlayerCamera * cam = PlayerCamera::GetSingleton();
-			if(!cam || !cam->cameraNode) return false;
-			const NiPoint3 cp = cam->cameraNode->m_worldTransform.pos;
-			const NiPoint3 pp = Engine::Position(player);
-			const float dx = pp.x - cp.x, dy = pp.y - cp.y;
-			if(dx * dx + dy * dy < 1.0f) return false;
-			*outYaw = atan2f(dx, dy);
-			return true;
-		}
-		__except(EXCEPTION_EXECUTE_HANDLER) { return false; }
-	}
-
-	class RemapSink : public BSTEventSink<InputEvent>
-	{
-	public:
-		virtual EventResult ReceiveEvent(InputEvent ** events, InputEventDispatcher * dispatcher)
-		{
-			g_rwCount = 0;		// registos de um despacho anterior abortado: descartar (os eventos ja nao existem)
-			if(!g_remapReady || !events || !*events) return kEvent_Continue;
-			InputStringHolder * strings = Engine::UserEvents();
-			if(!strings) return kEvent_Continue;
-
-			const BSFixedString * seq[4] = { &strings->forward, &strings->strafeRight, &strings->back, &strings->strafeLeft };
-
-			for(InputEvent * e = *events; e; e = e->next)
-			{
-				if(e->eventType != InputEvent::kEventType_Button || e->deviceType != kDeviceType_Keyboard) continue;
-				ButtonEvent * button = (ButtonEvent *)e;
-				const BSFixedString * control = button->GetControlID();
-				if(!control) continue;
-
-				int idx = -1;
-				for(int i = 0; i < 4; ++i) if(*control == *seq[i]) { idx = i; break; }
-				if(idx < 0) continue;
-
-				const bool held = (*(float *)&button->flags) != 0.0f;
-				int k = 0;
-				if(held)
-				{
-					if(!g_mapActive[idx])
-					{
-						// Toque novo: escolhe a rotacao agora e mantem-na ate soltar (evita teclas "presas").
-						g_mapK[idx] = 0;
-						PlayerCharacter * player = Engine::Player();
-						float camYaw = 0.0f;
-						if(g_remapActive && g_cfg.screenRelativeMove && player && CameraHeading(player, &camYaw))
-						{
-							const float delta = WrapPi(camYaw - Engine::Rotation(player).z);
-							int q = (int)floorf(delta / (kPi * 0.5f) + 0.5f);
-							g_mapK[idx] = ((q % 4) + 4) % 4;
-						}
-						g_mapActive[idx] = true;
-						if(g_mapK[idx] != 0) _MESSAGE("screen-relative move: key %d rotated by %d quarter turn(s)", idx, g_mapK[idx]);
-					}
-					k = g_mapK[idx];
-				}
-				else
-				{
-					if(g_mapActive[idx]) { k = g_mapK[idx]; g_mapActive[idx] = false; }
-				}
-
-				if(k != 0 && g_rwCount < kMaxRewrite)
-				{
-					const char ** slot = (const char **)&button->controlID;
-					g_rwEvent[g_rwCount] = button;
-					g_rwOrig[g_rwCount] = *slot;
-					++g_rwCount;
-					*slot = seq[(idx + k) & 3]->data;
-				}
-			}
-			return kEvent_Continue;
-		}
-	};
-	RemapSink g_remapSink;
-
-	// Poe o recetor 'sink' na 1a posicao da lista do despachante (antes dos recetores do jogo).
-	bool MoveSinkToFront(InputEventDispatcher * d, BSTEventSink<InputEvent> * sink)
-	{
-		__try
-		{
-			tArray<void *> * arr = (tArray<void *> *)((UInt8 *)d + 0x08);
-			if(!arr->arr.entries || arr->count < 2 || arr->count > 64) return false;
-			int idx = -1;
-			for(UInt32 i = 0; i < arr->count; ++i) if(arr->arr.entries[i] == (void *)sink) { idx = (int)i; break; }
-			if(idx < 0) return false;
-			for(int i = idx; i > 0; --i) arr->arr.entries[i] = arr->arr.entries[i - 1];
-			arr->arr.entries[0] = (void *)sink;
-			return true;
-		}
-		__except(EXCEPTION_EXECUTE_HANDLER) { return false; }
-	}
-
 	class InputSink : public BSTEventSink<InputEvent>
 	{
 	public:
 		virtual EventResult ReceiveEvent(InputEvent ** events, InputEventDispatcher * dispatcher)
 		{
-			RestoreRewritten();
 			InputStringHolder * strings = Engine::UserEvents();
 			if(!events || !*events || !strings) return kEvent_Continue;
 			if(!g_cfg.enabled) return kEvent_Continue;
@@ -1285,6 +1676,13 @@ namespace
 				// Diagnostico: regista cada toque de tecla (para descobrir codigos de tecla).
 				if(g_cfg.probe && pressedNow)
 					_MESSAGE("probe-key: device=%u code=%u control=%s", (unsigned)e->deviceType, (unsigned)button->keyMask, (control && control->data) ? control->data : "-");
+
+				// Lock-on proprio: tecla de ligar/desligar e de trocar de alvo (so fora de menus).
+				if(pressedNow && g_cfg.lockEnabled && !MenuBlocksInput())
+				{
+					if(MatchKey((UInt32)e->deviceType, (int)button->keyMask, g_cfg.lockKey)) LockToggle();
+					else if(MatchKey((UInt32)e->deviceType, (int)button->keyMask, g_cfg.lockSwitchKey)) LockSwitch();
+				}
 
 				if(e->deviceType == kDeviceType_Keyboard)
 				{
@@ -1367,9 +1765,6 @@ namespace
 				InputEventDispatcher * dispatcher = *g_inputEventDispatcher;
 				if(!dispatcher) { _MESSAGE("input dispatcher not available - the mod will not work"); break; }
 				dispatcher->AddEventSink(&g_sink);
-				dispatcher->AddEventSink(&g_remapSink);
-				g_remapReady = MoveSinkToFront(dispatcher, &g_remapSink);
-				_MESSAGE("screen-relative movement receiver: %s", g_remapReady ? "placed before the game's receivers" : "NOT placed (feature unavailable)");
 				CreateThread(NULL, 0, TurnThread, NULL, 0, NULL);
 				_MESSAGE("input receiver registered, turn thread started");
 				break;
