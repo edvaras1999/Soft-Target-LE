@@ -19,7 +19,7 @@ int ocount
 int lang		; 0 = English, 1 = Portugues
 
 int Function GetVersion()
-	return 7
+	return 8
 EndFunction
 
 Function InitTables()
@@ -57,12 +57,13 @@ EndEvent
 ; Page names follow the chosen language (they refresh the next time the menu is opened).
 Function SetPageNames()
 	lang = SoftTargetNative.GetInt("Language")
-	Pages = new string[5]
+	Pages = new string[6]
 	Pages[0] = T("General", "Geral")
-	Pages[1] = T("Targeting", "Alvo")
-	Pages[2] = T("Combos and turning", "Combos e giro")
-	Pages[3] = T("Camera and movement", "Camera e movimento")
-	Pages[4] = T("Magic aim", "Mira da magia")
+	Pages[1] = T("Lock-On", "Lock-On")
+	Pages[2] = T("Targeting", "Alvo")
+	Pages[3] = T("Combos and turning", "Combos e giro")
+	Pages[4] = T("Camera and movement", "Camera e movimento")
+	Pages[5] = T("Magic aim", "Mira da magia")
 EndFunction
 
 string Function T(string en, string pt)
@@ -224,10 +225,12 @@ Event OnPageReset(string a_page)
 	if p == 0
 		PageGeneral()
 	elseIf p == 1
-		PageTargeting()
+		PageLock()
 	elseIf p == 2
-		PageBody()
+		PageTargeting()
 	elseIf p == 3
+		PageBody()
+	elseIf p == 4
 		PageCamera()
 	else
 		PageMagic()
@@ -277,12 +280,12 @@ Function PageGeneral()
 	AddEmptyOption()
 	AddToggleRow("Enabled", T("Enabled", "Ativado"), 1.0, T("Turns the whole mod on or off.", "Liga ou desliga o mod inteiro."))
 	AddMenuRow("Language", T("Menu language", "Idioma do menu"), 1, 0.0, T("Language of this menu. Page names update the next time you open the menu.", "Idioma deste menu. Os nomes das páginas mudam na próxima vez que abrir o menu."))
-	AddMenuRow("ProfileMode", T("Profile", "Perfil"), 7, 1.0, T("Normal: no directional movement (TDM off, or Coeus with EnableUnsheathed=0, so weapons-drawn movement is vanilla). TDM: Coeus directional movement is active with weapons drawn (EnableUnsheathed=1). Pick the one that matches your Coeus setting.", "Normal: sem movimento direcional (TDM desligado, ou Coeus com EnableUnsheathed=0, então com armas na mão o movimento é o do jogo). TDM: o movimento direcional do Coeus está ativo com armas na mão (EnableUnsheathed=1). Escolha o que corresponde à sua configuração do Coeus."))
+	AddMenuRow("ProfileMode", T("Profile", "Perfil"), 7, 0.0, T("Normal: no directional movement (TDM off, or Coeus with EnableUnsheathed=0, so weapons-drawn movement is vanilla). TDM: Coeus directional movement is active with weapons drawn (EnableUnsheathed=1). Pick the one that matches your Coeus setting.", "Normal: sem movimento direcional (TDM desligado, ou Coeus com EnableUnsheathed=0, então com armas na mão o movimento é o do jogo). TDM: o movimento direcional do Coeus está ativo com armas na mão (EnableUnsheathed=1). Escolha o que corresponde à sua configuração do Coeus."))
 	AddEmptyOption()
 	AddHeaderOption(T("Status", "Estado"))
 	AddEmptyOption()
 	AddStatusRow(T("Active profile", "Perfil ativo"), ProfileName(SoftTargetNative.Status(0)), T("The profile you chose above.", "O perfil escolhido acima."))
-	AddStatusRow(T("Lock-on active", "Lock-on ativo"), YesNo(SoftTargetNative.Status(3)), "")
+	AddStatusRow(T("Lock-on active", "Lock-on ativo"), YesNo(SoftTargetNative.Status(3)), T("Whether the lock-on (this mod's or LockOn.dll) is on right now.", "Se o lock-on (deste mod ou da LockOn.dll) está ligado agora."))
 	AddStatusRow(T("Coeus found", "Coeus encontrado"), YesNo(SoftTargetNative.Status(2)), "")
 	AddStatusRow(T("LockOn.dll found", "LockOn.dll encontrada"), YesNo(SoftTargetNative.Status(1)), "")
 	AddHeaderOption(T("Settings file", "Ficheiro de configuração"))
@@ -334,8 +337,6 @@ Function PageBody()
 	if prof == 0
 		AddHeaderOption(T("Normal profile (without TDM)", "Perfil normal (sem TDM)"))
 		AddEmptyOption()
-		AddToggleRow("FreeCamEnabled", T("Free camera (Shift + mouse)", "Câmera livre (Shift + rato)"), 1.0, T("While the body is locked on the enemy, hold Shift and move the mouse to look around without turning the body. Release Shift and the camera returns behind the character. Shift + W/A/S/D is sprinting: it ends the combat window so you can run away.", "Com o corpo preso ao inimigo, segure Shift e mexa o rato para olhar à volta sem virar o corpo. Ao largar o Shift a câmera volta para trás do personagem. Shift + W/A/S/D é correr: termina a janela de combate para poder fugir."))
-		AddSliderRow("FreeCamSmoothing", T("Camera return smoothing", "Suavização do regresso da câmera"), 0.5, 15.0, 0.5, 3.0, 1.0, 0, "{1}", T("Lower is slower and softer. Default 3.", "Menos é mais lento e suave. Padrão: 3."))
 		AddToggleRow("ReturnToHeading", T("Return to previous heading", "Voltar ao rumo anterior"), 0.0, T("After the combat window ends, the body turns slowly back to where it was facing. Off by default. Does not return while you hold the walk keys.", "Depois que a janela de combate termina, o corpo volta devagar para onde estava virado. Desligado por padrão. Não volta enquanto segura as teclas de andar."))
 		AddSliderRow("ReturnSpeedDegPerSec", T("Return max speed", "Velocidade máxima do regresso"), 90.0, 1000.0, 10.0, 360.0, 1.0, 0, "{0} deg/s", T("Upper limit of the return speed, in degrees per second.", "Limite máximo da velocidade do regresso, em graus por segundo."))
 		AddSliderRow("ReturnSmoothing", T("Return smoothing", "Suavização do regresso"), 0.5, 15.0, 0.5, 3.0, 1.0, 0, "{1}", T("Lower is slower and softer. Default 3.", "Menos é mais lento e suave. Padrão: 3."))
@@ -348,21 +349,44 @@ Function PageCamera()
 	if prof == 1
 		AddHeaderOption(T("TDM profile (directional movement)", "Perfil TDM (movimento direcional)"))
 		AddEmptyOption()
-		AddToggleRow("CoeusYield", T("Face the target while moving", "Encarar o alvo enquanto anda"), 1.0, T("During the combat window Coeus lets go of the body: the character faces the enemy and walks relative to that facing (W = toward the enemy, S = backpedal, A/D = strafe) while the camera stays free (this mod keeps free rotation on). When off, Coeus keeps control while you walk.", "Durante a janela de combate o Coeus larga o corpo: o personagem encara o inimigo e anda relativo a isso (W = para o inimigo, S = recuar, A/D = lateral) enquanto a câmera fica onde a deixou. Desligado, o Coeus mantém o controlo enquanto anda."))
-		AddToggleRow("ScreenRelativeMove", T("Move relative to the screen (experimental)", "Andar relativo ao ecrã (experimental)"), 1.0, T("While facing the target, W/A/S/D move you relative to the screen/camera (W = into the screen), not relative to the body. Direction is picked in 90-degree steps when a key is pressed. Turn off if movement feels wrong or keys seem stuck.", "Enquanto encara o alvo, W/A/S/D movem-no relativo ao ecrã/câmera (W = para dentro do ecrã), e não ao corpo. A direção é escolhida em passos de 90 graus quando carrega na tecla. Desligue se o movimento parecer errado ou as teclas ficarem presas."))
+		AddToggleRow("CoeusYield", T("Face the target while moving", "Encarar o alvo enquanto anda"), 1.0, T("During the combat window (or with the lock-on on) Coeus lets go of the body: the character faces the enemy and walks relative to that facing (W = toward the enemy, S = backpedal, A/D = strafe). The camera is not touched. When off, Coeus keeps control while you walk.", "Durante a janela de combate (ou com o lock-on ligado) o Coeus larga o corpo: o personagem encara o inimigo e anda relativo a isso (W = para o inimigo, S = recuar, A/D = lateral). A câmera não é tocada. Desligado, o Coeus mantém o controlo enquanto anda."))
 		AddSliderRow("AttackPulseMs", T("Turn while walking", "Virar enquanto anda"), 0.0, 1500.0, 50.0, 350.0, 0.001, 1, "{2} s", T("Only when 'Face the target while moving' is off: each attack turns the walking body toward the enemy for this long. 0 = never.", "Só quando 'Encarar o alvo enquanto anda' está desligado: cada ataque vira o corpo em movimento para o inimigo durante este tempo. 0 = nunca."))
-	endIf
-	if prof == 0
+	else
 		AddHeaderOption(T("Normal profile (without TDM)", "Perfil normal (sem TDM)"))
 		AddEmptyOption()
-		AddMenuRow("CameraMode", T("Camera while turning", "Câmera durante o giro"), 4, 0.0, T("Follows the target: the camera turns with the body (vanilla). Stays still: the camera keeps its view while the body turns. Shift + mouse always gives a free camera.", "Acompanha o alvo: a câmera vira com o corpo (como no jogo). Fica parada: a câmera mantém a vista enquanto o corpo vira. Shift + rato dá sempre câmera livre."))
-		AddEmptyOption()
+		AddStatusRow(T("Camera options", "Opções da câmera"), T("see Lock-On page", "veja a página Lock-On"), T("In the normal profile the camera options for the lock-on are on the Lock-On page. Outside the lock-on the camera is never touched.", "No perfil normal as opções da câmera do lock-on estão na página Lock-On. Fora do lock-on a câmera nunca é tocada."))
 	endIf
-	AddHeaderOption(T("Lock-on (Simple Lock-On / Coeus)", "Lock-on (Simple Lock-On / Coeus)"))
+EndFunction
+
+Function PageLock()
+	AddHeaderOption(T("Lock-On (replaces Simple Lock-On)", "Lock-On (substitui o Simple Lock-On)"))
 	AddEmptyOption()
-	AddMenuRow("LockOnMode", T("While locked on", "Com o lock-on ativo"), 6, 0.0, T("Pause SoftTarget while the lock-on is active, or let it turn only the body without touching the camera.", "Pausar o SoftTarget enquanto o lock-on está ativo, ou deixá-lo virar só o corpo sem mexer na câmera."))
-	AddKeyRow("LockOnSwitchKey", T("Switch-target key", "Tecla de trocar alvo"), T("Key the mod presses to switch the lock-on target (mode 'switch to nearest'). 0 = the key LockOn.dll reports. If that key turns the lock-on off, the assist switches itself off.", "Tecla que o mod carrega para trocar o alvo do lock-on (modo 'trocar para o mais próximo'). 0 = a que a LockOn.dll indica. Se essa tecla desligar o lock-on, a ajuda desliga-se sozinha."))
-	AddKeyRow("LockOnKey", T("Lock-on key (fallback)", "Tecla do lock-on (reserva)"), T("Only used when the lock-on state cannot be read from LockOn.dll. Each press toggles the pause.", "Só é usada quando o estado do lock-on não pode ser lido da LockOn.dll. Cada toque liga ou desliga a pausa."))
+	AddToggleRow("LockEnabled", T("Lock-on enabled", "Lock-on ligado"), 1.0, T("Press the lock key to lock the enemy under the crosshair. Works in and out of combat. Do not use together with LockOn.dll / Simple Lock-On: remove that mod.", "Carregue na tecla do lock para prender o inimigo que está na mira. Funciona dentro e fora do combate. Não use junto com a LockOn.dll / Simple Lock-On: retire esse mod."))
+	AddEmptyOption()
+	AddKeyRow("LockKey", T("Lock on/off key", "Tecla de ligar/desligar"), T("Default F. Mouse buttons work too (pick one in the dialog).", "Padrão: F. Botões do rato também servem (escolha no diálogo)."))
+	AddKeyRow("LockSwitchKey", T("Switch-target key", "Tecla de trocar de alvo"), T("Default M3 (middle mouse button). Switches to the enemy closest to the center of the screen.", "Padrão: M3 (botão do meio do rato). Troca para o inimigo mais perto do centro do ecrã."))
+	AddHeaderOption(T("Choosing the target", "Escolha do alvo"))
+	AddEmptyOption()
+	AddSliderRow("LockRange", T("Range", "Alcance"), 500.0, 8000.0, 100.0, 4000.0, 1.0, 0, "{0}", T("How far away a target can be locked and followed. 70 is about 1 meter.", "A que distância um alvo pode ser preso e seguido. 70 é cerca de 1 metro."))
+	AddSliderRow("LockAcquireDegrees", T("Aim area", "Área da mira"), 5.0, 90.0, 1.0, 30.0, 1.0, 0, "{0} deg", T("How far from the crosshair, in degrees, any part of the enemy's body (head, legs, wings, tail) may be and still be locked. The one closest to the crosshair wins.", "A que distância da mira, em graus, qualquer parte do corpo do inimigo (cabeça, pernas, asas, cauda) pode estar para ser presa. Ganha a que estiver mais perto da mira."))
+	AddToggleRow("LockHostileOnly", T("Only enemies", "Só inimigos"), 1.0, T("If off, any living creature or person can be locked (for example animals when hunting).", "Se desligado, qualquer criatura ou pessoa viva pode ser presa (por exemplo animais na caça)."))
+	AddToggleRow("LockAutoNext", T("Next enemy when target dies", "Próximo inimigo quando o alvo morre"), 1.0, T("When the target dies the lock goes to the nearest enemy instead of turning off.", "Quando o alvo morre o lock passa para o inimigo mais próximo em vez de desligar."))
+	AddHeaderOption(T("Losing the target", "Perder o alvo"))
+	AddEmptyOption()
+	AddSliderRow("LockLoseSightMs", T("Time out of view", "Tempo fora da vista"), 0.0, 5000.0, 100.0, 1500.0, 0.001, 1, "{1} s", T("The lock turns off if the target stays out of view for this long.", "O lock desliga se o alvo ficar fora da vista durante este tempo."))
+	AddSliderRow("LockLoseAngleDegrees", T("Out-of-view angle", "Ângulo de fora da vista"), 30.0, 170.0, 5.0, 75.0, 1.0, 0, "{0} deg", T("The target counts as out of view when its whole body is further than this from the center of the screen. Walls and rocks in between are not detected yet.", "O alvo conta como fora da vista quando o corpo inteiro está mais longe do que isto do centro do ecrã. Paredes e rochas pelo meio ainda não são detetadas."))
+	AddHeaderOption(T("Camera (normal profile)", "Câmera (perfil normal)"))
+	AddEmptyOption()
+	AddToggleRow("LockCameraFollow", T("Camera follows the target", "Câmera acompanha o alvo"), 1.0, T("With the lock on, the camera turns to the target. In the TDM profile the camera is always left free.", "Com o lock ligado, a câmera vira para o alvo. No perfil TDM a câmera fica sempre livre."))
+	AddToggleRow("LockCameraPitch", T("Camera also looks up/down", "Câmera também sobe/desce"), 1.0, T("The camera tilts up or down toward the target (dragons, high ground). Turn off if the camera behaves strangely.", "A câmera inclina para cima ou para baixo para o alvo (dragões, terreno alto). Desligue se a câmera se portar de forma estranha."))
+	AddSliderRow("LockCameraSmooth", T("Camera speed", "Velocidade da câmera"), 2.0, 20.0, 0.5, 8.0, 1.0, 0, "{1}", T("How fast the camera turns to the target. Higher is faster and less smooth.", "A velocidade com que a câmera vira para o alvo. Mais é mais rápido e menos suave."))
+	AddHeaderOption(T("Shot prediction (only with lock-on)", "Previsão do disparo (só com lock-on)"))
+	AddEmptyOption()
+	AddToggleRow("PredictEnabled", T("Predict the shot", "Prever o disparo"), 1.0, T("While you draw a bow / crossbow or hold a spell button with the lock on, the aim leads a moving target. Without lock-on the shot is the normal one.", "Enquanto puxa o arco / besta ou segura o botão de uma magia com o lock ligado, a mira antecipa o alvo em movimento. Sem lock-on o disparo é o normal."))
+	AddSliderRow("PredictStrength", T("Prediction strength", "Força da previsão"), 0.0, 150.0, 5.0, 100.0, 1.0, 0, "{0} %", T("How much of the computed lead is applied. Lower if shots go too far ahead of the target, raise if they fall behind.", "Quanto da antecipação calculada é aplicada. Baixe se os tiros vão muito à frente do alvo, suba se ficam atrás."))
+	AddSliderRow("ProjectileSpeed", T("Projectile speed", "Velocidade do projétil"), 1000.0, 12000.0, 100.0, 4500.0, 1.0, 0, "{0}", T("Speed used to compute the lead, in units per second. Arrows are fast, many spells are slower: lower this for magic.", "Velocidade usada para calcular a antecipação, em unidades por segundo. As flechas são rápidas, muitas magias são mais lentas: baixe isto para magia."))
+	AddSliderRow("ProjectileGravity", T("Projectile drop", "Queda do projétil"), 0.0, 2000.0, 50.0, 0.0, 1.0, 0, "{0}", T("Raises the aim to compensate for the drop at long distance. 0 = no compensation.", "Levanta a mira para compensar a queda a longa distância. 0 = sem compensação."))
+	AddSliderRow("PredictMinDistance", T("Minimum distance", "Distância mínima"), 100.0, 2000.0, 50.0, 400.0, 1.0, 0, "{0}", T("Closer than this there is no prediction.", "Mais perto do que isto não há previsão."))
 EndFunction
 
 Function PageMagic()
