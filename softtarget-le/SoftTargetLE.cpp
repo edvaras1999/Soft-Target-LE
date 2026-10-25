@@ -31,7 +31,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.12.0 (eixo da camera fixo, alvo mais proximo com o corpo todo, camera de deslocamento no TDM, ponto no ecra)"
+#define PLUGIN_VERSION_STR	"0.12.1 (ponto: frustum real e diagnostico dos .swf, camera parada com arco, camera do perfil normal compensa o deslocamento, perfil FreeCam/Coeus)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -542,6 +542,8 @@ namespace
 		return 1;
 	}
 
+	int DotFilesFound();
+
 	// Estado para o menu: 0 = perfil efetivo (1 sem TDM, 2 Coeus), 1 = LockOn.dll, 2 = Coeus.dll (0/1), 3 = lock-on ativo
 	SInt32 N_Status(StaticFunctionTag *, SInt32 what)
 	{
@@ -551,6 +553,7 @@ namespace
 			case 1: return g_sloIsLockOn ? 1 : 0;
 			case 2: return (g_coeusExternal || g_coeusDirActive) ? 1 : 0;
 			case 3: return (g_lockActive || g_lockOwn) ? 1 : 0;
+			case 4: return DotFilesFound();
 		}
 		return 0;
 	}
@@ -580,6 +583,7 @@ namespace
 	volatile LONG	g_active	= 0;		// 1 = sessao de combate em curso (o corpo encara o alvo mais proximo)
 	volatile LONG	g_shiftHeld = 0;		// Shift (ou outra tecla de ShiftKeys) carregado
 	volatile DWORD	g_lastAttackTick = 0;	// ultimo toque de ataque
+	volatile LONG	g_yieldNow = 0;			// 1 = o pedido ao Coeus (lock externo) esta ligado
 	float			g_findCenter[3] = { 0.0f, 0.0f, 0.0f };		// centro do corpo do alvo do SoftTarget (para o ponto no ecra)
 	float			g_lockCenter[3] = { 0.0f, 0.0f, 0.0f };		// centro do corpo do alvo do lock-on
 
@@ -1325,6 +1329,8 @@ namespace
 		DWORD	lastCheck;
 		int		drawnColor;
 		int		drawnSkin;
+		int		reqSkin;		// ultimo aspeto pedido no menu
+		bool	diag;			// ja registou o estado do carregamento desta tentativa
 		bool	loggedFrustum;
 	};
 	DotCtx g_dot;
@@ -1363,8 +1369,49 @@ namespace
 	}
 
 	const int kDotColors[6] = { 0xFFFFFF, 0xFF3030, 0xFFE040, 0x40E0FF, 0x50FF50, 0xFF9020 };
-	const char * kUrlsSimple[] = { "SoftTarget/LockOnReticle.swf", "Interface/SoftTarget/LockOnReticle.swf", "LockOnMenu.swf", "Interface/LockOnMenu.swf" };
-	const char * kUrlsTdm[]    = { "TrueDirectionalMovement/TDM_Widgets.swf", "Interface/TrueDirectionalMovement/TDM_Widgets.swf" };
+	// Ficheiros .swf por aspeto (relativos a Data\\Interface) e os caminhos que o loadMovie recebe.
+	const char * kRelSimple[] = { "SoftTarget\\LockOnReticle.swf", "LockOnReticle.swf", "LockOnMenu.swf" };
+	const char * kRelTdm[]    = { "TDM_Widgets.swf", "TrueDirectionalMovement\\TDM_Widgets.swf" };
+	char	g_urls[24][110];
+	int		g_nUrls = 0;
+
+	bool InterfaceFile(const char * rel)
+	{
+		char path[260];
+		_snprintf_s(path, sizeof(path), _TRUNCATE, "Data\\Interface\\%s", rel);
+		return FileExists(path);
+	}
+
+	// Bitmask: 1 = reticula do Simple Lock-On encontrada, 2 = reticula do TDM (Widgets + Assets0) encontrada.
+	int DotFilesFound()
+	{
+		int m = 0;
+		for(int i = 0; i < 3; ++i) if(InterfaceFile(kRelSimple[i])) { m |= 1; break; }
+		bool w = false;
+		for(int i = 0; i < 2; ++i) if(InterfaceFile(kRelTdm[i])) { w = true; break; }
+		if(w && (InterfaceFile("TDM_Assets0.swf") || InterfaceFile("TrueDirectionalMovement\\TDM_Assets0.swf"))) m |= 2;
+		return m;
+	}
+
+	// Constroi a lista de caminhos a tentar: so os ficheiros que existem, cada um com 3 formas de escrever o caminho.
+	void BuildUrls(int skin)
+	{
+		g_nUrls = 0;
+		const char ** rel = (skin == 2) ? kRelSimple : kRelTdm;
+		const int n = (skin == 2) ? 3 : 2;
+		for(int i = 0; i < n; ++i)
+		{
+			const bool ex = InterfaceFile(rel[i]);
+			_MESSAGE("dot: file Data\\Interface\\%s %s", rel[i], ex ? "FOUND" : "not found");
+			if(!ex) continue;
+			char fwd[100];
+			_snprintf_s(fwd, sizeof(fwd), _TRUNCATE, "%s", rel[i]);
+			for(char * c = fwd; *c; ++c) if(*c == '\\') *c = '/';
+			static const char * pre[3] = { "", "Interface/", "Data/Interface/" };
+			for(int k = 0; k < 3 && g_nUrls < 24; ++k)
+				_snprintf_s(g_urls[g_nUrls++], sizeof(g_urls[0]), _TRUNCATE, "%s%s", pre[k], fwd);
+		}
+	}
 
 	bool IsObj(const GFxValue & v) { return v.GetType() >= GFxValue::kType_Object; }
 
@@ -1413,12 +1460,43 @@ namespace
 		}
 	}
 
+	// Le o frustum (offset 0xE8 da NiCamera) diretamente de um objeto e valida se parece um frustum.
+	bool FrustumRaw(void * obj, float * h, float * v)
+	{
+		if(!obj) return false;
+		const float * f = (const float *)((UInt8 *)obj + 0xE8);
+		const float l = f[0], r = f[1], t = f[2], b = f[3], n = f[4];
+		if(!(n > 0.01f && n < 200.0f && r > l && t > b)) return false;
+		const float hh = (r - l) * 0.5f / n, vv = (t - b) * 0.5f / n;
+		if(!(hh > 0.2f && hh < 4.0f && vv > 0.1f && vv < 4.0f)) return false;
+		*h = hh; *v = vv;
+		return true;
+	}
+
 	// Tangentes do meio-campo de visao (horizontal e vertical), do frustum da NiCamera; reserva: worldFOV.
 	bool CameraTan(float * tanH, float * tanV)
 	{
 		PlayerCamera * cam = PlayerCamera::GetSingleton();
 		if(!cam || !cam->cameraNode) return false;
 		NiNode * n = cam->cameraNode;
+		{
+			// 1) leitura direta: o proprio no e cada filho (a NiCamera costuma ser o 1o filho)
+			float h = 0.0f, v = 0.0f;
+			int where = -2;
+			if(FrustumRaw(n, &h, &v)) where = -1;
+			else
+			{
+				const NiTArray<NiAVObject *> & ch0 = n->m_children;
+				for(UInt16 i = 0; i < ch0.m_emptyRunStart && i < 8 && where == -2; ++i)
+					if(ch0.m_data[i] && FrustumRaw(ch0.m_data[i], &h, &v)) where = (int)i;
+			}
+			if(where != -2)
+			{
+				*tanH = h; *tanV = v;
+				if(!g_dot.loggedFrustum) { g_dot.loggedFrustum = true; _MESSAGE("dot: camera frustum read directly (%s %d): tanH %.3f tanV %.3f (h-fov %.1f deg, v-fov %.1f deg)", where < 0 ? "node itself" : "child", where, h, v, 2.0f * atanf(h) * 180.0f / kPi, 2.0f * atanf(v) * 180.0f / kPi); }
+				return true;
+			}
+		}
 		NiCamera * nc = DYNAMIC_CAST(n, NiAVObject, NiCamera);
 		if(!nc)
 		{
@@ -1506,6 +1584,7 @@ namespace
 		if(!view) { s.state = 0; s.shown = false; g_dotShown = 0; return; }
 		if(view != (GFxMovieView *)s.view) { s.view = view; s.state = 0; s.shown = false; s.fallback = 0; s.cand = 0; }
 
+		if(s.reqSkin != g_cfg.dotSkin) { s.reqSkin = g_cfg.dotSkin; s.fallback = 0; s.cand = 0; }	// mudar o aspeto no menu tenta de novo
 		int skin = g_cfg.dotSkin;
 		if(s.fallback) skin = 0;
 
@@ -1548,15 +1627,21 @@ namespace
 			}
 			else
 			{
-				const char ** urls = (skin == 2) ? kUrlsSimple : kUrlsTdm;
-				const int nUrls = (skin == 2) ? (int)(sizeof(kUrlsSimple) / sizeof(kUrlsSimple[0])) : (int)(sizeof(kUrlsTdm) / sizeof(kUrlsTdm[0]));
-				if(s.cand >= nUrls) s.cand = 0;
+				BuildUrls(skin);
+				if(g_nUrls == 0)
+				{
+					DotFail("the .swf files of this appearance were not found in Data\\Interface - using the plain dot instead");
+					CallNone(clip, "removeMovieClip");
+					s.fallback = 1; s.state = 0; s.cand = 0;
+					return;
+				}
+				s.cand = 0;
 				if(skin == 2) SaveStage(view);
 				GFxValue a1[1], r;
-				a1[0].SetString(urls[s.cand]);
+				a1[0].SetString(g_urls[s.cand]);
 				clip.Invoke("loadMovie", &r, a1, 1);
-				s.state = 1;
-				_MESSAGE("dot: loading '%s' (skin %d)", urls[s.cand], skin);
+				s.state = 1; s.diag = false;
+				_MESSAGE("dot: loading '%s' (skin %d, %d paths to try)", g_urls[s.cand], skin, g_nUrls);
 			}
 			return;
 		}
@@ -1601,24 +1686,35 @@ namespace
 				s.state = 2;
 				_MESSAGE("dot: .swf ready after %lu ms (try %d)", (unsigned long)(now - s.t0), s.cand + 1);
 			}
-			else if(now - s.t0 > 2500)
+			else
 			{
-				const int nUrls = (s.skin == 2) ? (int)(sizeof(kUrlsSimple) / sizeof(kUrlsSimple[0])) : (int)(sizeof(kUrlsTdm) / sizeof(kUrlsTdm[0]));
-				++s.cand;
-				if(s.cand >= nUrls)
+				if(!s.diag && now - s.t0 > 800)
 				{
-					DotFail("no .swf could be loaded (check Data\\Interface) - using the plain dot instead");
-					CallNone(clip, "removeMovieClip");
-					s.fallback = 1; s.state = 0; s.cand = 0;
+					// Diagnostico: o que o clip tem 0,8 s depois do loadMovie.
+					s.diag = true;
+					GFxValue bt, bl, fl, a0[1];
+					clip.Invoke("getBytesTotal", &bt, a0, 0);
+					clip.Invoke("getBytesLoaded", &bl, a0, 0);
+					clip.GetMember("_framesloaded", &fl);
+					_MESSAGE("dot: after 0.8 s: bytesTotal=%.0f bytesLoaded=%.0f framesLoaded=%.0f", bt.GetType() == GFxValue::kType_Number ? bt.GetNumber() : -1.0, bl.GetType() == GFxValue::kType_Number ? bl.GetNumber() : -1.0, fl.GetType() == GFxValue::kType_Number ? fl.GetNumber() : -1.0);
 				}
-				else
+				if(now - s.t0 > 1500)
 				{
-					const char ** urls = (s.skin == 2) ? kUrlsSimple : kUrlsTdm;
-					GFxValue a1[1], r;
-					a1[0].SetString(urls[s.cand]);
-					clip.Invoke("loadMovie", &r, a1, 1);
-					s.t0 = now;
-					_MESSAGE("dot: trying '%s'", urls[s.cand]);
+					++s.cand;
+					if(s.cand >= g_nUrls)
+					{
+						DotFail("the .swf was found on disk but could not be loaded into the HUD - using the plain dot instead");
+						CallNone(clip, "removeMovieClip");
+						s.fallback = 1; s.state = 0; s.cand = 0;
+					}
+					else
+					{
+						GFxValue a1[1], r;
+						a1[0].SetString(g_urls[s.cand]);
+						clip.Invoke("loadMovie", &r, a1, 1);
+						s.t0 = now; s.diag = false;
+						_MESSAGE("dot: trying '%s'", g_urls[s.cand]);
+					}
 				}
 			}
 			return;
@@ -1830,7 +1926,7 @@ namespace
 			if((int)coeusProfile != lastProfile)
 			{
 				lastProfile = (int)coeusProfile;
-				_MESSAGE("profile: %s", coeusProfile ? "TDM (directional movement)" : "normal (no directional movement)");
+				_MESSAGE("profile: %s", coeusProfile ? "FreeCam / Coeus (directional movement)" : "normal (no directional movement)");
 			}
 
 			// Correr (Shift + andar) = fugir: a sessao acaba e o corpo volta a ser do jogador / do Coeus.
@@ -1926,7 +2022,7 @@ namespace
 			// Registo: inicio e fim de cada sessao de combate (e o motivo do fim).
 			if(g_active && !prevActive)
 			{
-				_MESSAGE("session start: profile=%s target=%08X handle=%08X%s", coeusProfile ? "TDM" : "normal", g_lastTargetId, (UInt32)g_targetHandle, g_lockOwn ? " (own lock-on)" : "");
+				_MESSAGE("session start: profile=%s target=%08X handle=%08X%s", coeusProfile ? "FreeCam" : "normal", g_lastTargetId, (UInt32)g_targetHandle, g_lockOwn ? " (own lock-on)" : "");
 			}
 			else if(!g_active && prevActive)
 			{
@@ -1949,7 +2045,7 @@ namespace
 					__try { g_coeusExternal(true, (UInt32)g_targetHandle); }
 					__except(EXCEPTION_EXECUTE_HANDLER) { g_coeusExternal = NULL; }
 					if(!yielding) _MESSAGE("coeus: external lock-on ON (handle %08X)", (UInt32)g_targetHandle);
-					yielding = true; lastYield = now;
+					yielding = true; lastYield = now; g_yieldNow = 1;
 				}
 			}
 			else if(yielding)
@@ -1960,7 +2056,7 @@ namespace
 					__except(EXCEPTION_EXECUTE_HANDLER) { g_coeusExternal = NULL; }
 				}
 				_MESSAGE("coeus: external lock-on OFF");
-				yielding = false;
+				yielding = false; g_yieldNow = 0;
 			}
 
 			NiPoint3 & rot = Engine::Rotation(player);
@@ -1988,7 +2084,12 @@ namespace
 				if(coeusProfile && g_cfg.cameraHoldTdm)
 				{
 					UInt8 * hcs = ThirdPersonStatePtr();
-					if(hcs && *(hcs + 0xB4)) CameraHold(hcs, stepYaw);		// o deslocamento perde o que o corpo ganha
+					// Camera livre (0xB4 ligado) ou mira com arco/magia (camera presa ao corpo): o deslocamento perde o que o corpo ganha.
+					if(hcs && (*(hcs + 0xB4) || RangedHeld(player)))
+					{
+						CameraHold(hcs, stepYaw);
+						if(g_cfg.verbose && fabsf(stepYaw) > 0.001f) _MESSAGE("camhold: step %.3f free=%d offset=%.3f", stepYaw, (int)*(hcs + 0xB4), *(float *)(hcs + 0xAC));
+					}
 				}
 				rot.z = WrapPi(rot.z + stepYaw);
 
@@ -2013,7 +2114,15 @@ namespace
 						if(!*(cs + 0xB4))
 						{
 							float cy = *(float *)(cs + 0x5C);
-							cy = WrapPi(cy + StepToward(cy, g_targetYaw, true, dt, maxRad, g_cfg.lockCameraSmooth));
+							float wantYaw = g_targetYaw;
+							{
+								// Erro entre a direcao REAL da camera e o alvo, medido a partir da posicao da camera: compensa
+								// qualquer deslocamento lateral/atras da camera (mods tipo AIM FIX).
+								float o2[3], d2[3];
+								if(CameraRay(player, o2, d2))
+									wantYaw = WrapPi(cy + WrapPi(atan2f(g_aimX - o2[0], g_aimY - o2[1]) - atan2f(d2[0], d2[1])));
+							}
+							cy = WrapPi(cy + StepToward(cy, wantYaw, true, dt, maxRad, g_cfg.lockCameraSmooth));
 							*(float *)(cs + 0x5C) = cy;
 							*(float *)(cs + 0x60) = cy;
 						}
@@ -2175,6 +2284,14 @@ namespace
 				const float len = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
 				if(len > 1.0f) _MESSAGE("probe-cam: axis %d match with camera->player %.2f | dot show=%d shown=%d state=%d skin=%d fallback=%d", g_camAxis, (d[0] * v[0] + d[1] * v[1] + d[2] * v[2]) / len, (int)g_dotShow, (int)g_dotShown, g_dot.state, g_dot.skin, g_dot.fallback);
 			}
+		}
+
+		{
+			int cdir = -1;
+			__try { if(g_coeusDirActive) cdir = g_coeusDirActive() ? 1 : 0; } __except(EXCEPTION_EXECUTE_HANDLER) { }
+			_MESSAGE("probe-move: coeusDirectional=%d yieldRequested=%d ownLock=%d keys F%d B%d L%d R%d shift=%d | body-to-target %.1f deg | profile=%d CoeusYield=%d",
+					 cdir, (int)g_yieldNow, (int)g_lockOwn, (int)g_kFwd, (int)g_kBack, (int)g_kLeft, (int)g_kRight, (int)g_shiftHeld,
+					 WrapPi(g_targetYaw - rot.z) * 180.0f / kPi, g_cfg.profileMode, g_cfg.coeusYield);
 		}
 
 		if(st)
