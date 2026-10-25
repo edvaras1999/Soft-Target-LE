@@ -19,6 +19,9 @@
 #include "skse/NiNodes.h"
 #include "skse/PapyrusVM.h"
 #include "skse/PapyrusNativeFunctions.h"
+#include "skse/Hooks_UI.h"
+#include "skse/ScaleformMovie.h"
+#include "skse/ScaleformCallbacks.h"
 #include "Log.h"
 #include "Engine.h"
 
@@ -28,7 +31,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.11.0 (lock-on proprio + previsao do disparo)"
+#define PLUGIN_VERSION_STR	"0.12.0 (eixo da camera fixo, alvo mais proximo com o corpo todo, camera de deslocamento no TDM, ponto no ecra)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -36,10 +39,13 @@
 static PluginHandle				g_pluginHandle	= kPluginHandle_Invalid;
 static SKSEMessagingInterface *	g_messaging		= NULL;
 static SKSEPapyrusInterface *	g_papyrus		= NULL;
+static SKSETaskInterface *		g_taskIface		= NULL;
 
 // O SKSE declara LookupREFRByHandle mas so a define em GameReferences.cpp, que nao compilamos.
 // Definimos aqui com o endereco da LE 1.9.32.0 (confirmado no FreeClimb LE).
 const _LookupREFRByHandle LookupREFRByHandle = (_LookupREFRByHandle)0x004A9180;
+// Cria o "handle" de uma referencia (visto na LockOn.dll; assinatura do SKSE: saida, referencia).
+const _CreateRefHandleByREFR CreateRefHandleByREFR = (_CreateRefHandleByREFR)0x0065CC00;
 
 namespace
 {
@@ -81,7 +87,6 @@ namespace
 		int		language;		// idioma do menu: 0 = ingles, 1 = portugues
 		int		profileMode;	// 0 = normal (sem TDM, ou Coeus com EnableUnsheathed=0), 1 = TDM (movimento direcional)
 		int		lockOnSwitchKey;// tecla para trocar de alvo no lock-on (0 = a que a LockOn.dll indica)
-		int		stickyTarget;	// 1 = durante uma sequencia de golpes mantem o alvo enquanto for valido
 		int		allowReanimated;// 1 = aceita inimigos reanimados / sem estado de vida normal
 		// ---- lock-on proprio
 		int		lockEnabled;	// 1 = lock-on proprio ligado
@@ -101,6 +106,19 @@ namespace
 		float	projectileGravity;// queda do projetil (unidades por segundo ao quadrado; 0 = sem compensacao)
 		float	predictStrength;// 0..100: quanto da previsao se aplica
 		float	predictMinDist;	// abaixo desta distancia nao ha previsao
+		// ---- v0.12.0
+		int		lockCameraAxis;	// eixo da camera que aponta para a frente (0..11); 1 = coluna Y da matriz (confirmado nos logs)
+		float	lockAutoCircle;	// escolha automatica: qualquer direcao ate esta distancia
+		float	lockAutoCone;	// escolha automatica: alem do circulo, so dentro deste angulo (cada lado) a frente da camera
+		int		cameraHoldTdm;	// perfil TDM: quando o corpo vira, a camera fica parada (deslocamento compensado)
+		int		createHandles;	// 1 = cria o handle de alvos que o jogo nao lista como hostis (o Coeus precisa dele)
+		int		dotLock;		// 1 = mostra o ponto no alvo do lock-on
+		int		dotSoft;		// 1 = mostra o ponto no alvo do SoftTarget
+		int		dotSkin;		// 0 = ponto, 1 = anel e ponto, 2 = reticula do Simple Lock-On (.swf), 3 = reticula do TDM (.swf)
+		float	dotSize;		// tamanho, % (100 = normal)
+		int		dotColor;		// 0 branco, 1 vermelho, 2 amarelo, 3 ciano, 4 verde, 5 laranja
+		float	dotOpacity;		// opacidade, %
+		int		dotTdmType;		// tipo da reticula do TDM (0..2)
 	};
 	Config g_cfg;
 
@@ -132,7 +150,7 @@ namespace
 		{ "AttackPulseMs",			'i', &g_cfg.attackPulseMs,		350.0f },
 		{ "LockOnKey",				'i', &g_cfg.lockOnKey,			0.0f },
 		{ "LockOnMode",				'i', &g_cfg.lockOnMode,			0.0f },
-		{ "CoeusYield",				'i', &g_cfg.coeusYield,			1.0f },
+		{ "CoeusYield",				'i', &g_cfg.coeusYield,			0.0f },
 		{ "VerticalMode",			'i', &g_cfg.verticalMode,		0.0f },
 		{ "AimHeight",				'f', &g_cfg.aimHeight,			100.0f },
 		{ "PlayerAimHeight",		'f', &g_cfg.playerAimHeight,	110.0f },
@@ -141,7 +159,6 @@ namespace
 		{ "Language",				'i', &g_cfg.language,			0.0f },
 		{ "ProfileMode",			'i', &g_cfg.profileMode,		0.0f },
 		{ "LockOnSwitchKey",		'i', &g_cfg.lockOnSwitchKey,	0.0f },
-		{ "StickyTarget",			'i', &g_cfg.stickyTarget,		1.0f },
 		{ "AllowReanimated",		'i', &g_cfg.allowReanimated,	1.0f },
 		{ "LockEnabled",			'i', &g_cfg.lockEnabled,		1.0f },
 		{ "LockKey",				'i', &g_cfg.lockKey,			33.0f },
@@ -160,6 +177,18 @@ namespace
 		{ "ProjectileGravity",		'f', &g_cfg.projectileGravity,	0.0f },
 		{ "PredictStrength",		'f', &g_cfg.predictStrength,	100.0f },
 		{ "PredictMinDistance",		'f', &g_cfg.predictMinDist,		400.0f },
+		{ "LockCameraAxis",			'i', &g_cfg.lockCameraAxis,		1.0f },
+		{ "LockAutoCircleRange",	'f', &g_cfg.lockAutoCircle,		900.0f },
+		{ "LockAutoConeDegrees",	'f', &g_cfg.lockAutoCone,		60.0f },
+		{ "CameraHoldTdm",			'i', &g_cfg.cameraHoldTdm,		1.0f },
+		{ "CreateHandles",			'i', &g_cfg.createHandles,		1.0f },
+		{ "DotLock",				'i', &g_cfg.dotLock,			1.0f },
+		{ "DotSoftTarget",			'i', &g_cfg.dotSoft,			0.0f },
+		{ "DotSkin",				'i', &g_cfg.dotSkin,			1.0f },
+		{ "DotSize",				'f', &g_cfg.dotSize,			100.0f },
+		{ "DotColor",				'i', &g_cfg.dotColor,			0.0f },
+		{ "DotOpacity",				'f', &g_cfg.dotOpacity,			100.0f },
+		{ "DotTdmType",				'i', &g_cfg.dotTdmType,			0.0f },
 	};
 	const int kNumOpts = sizeof(g_opts) / sizeof(g_opts[0]);
 
@@ -273,6 +302,17 @@ namespace
 		if(g_cfg.projectileSpeed < 500.0f)	g_cfg.projectileSpeed = 500.0f;
 		if(g_cfg.predictStrength < 0.0f)	g_cfg.predictStrength = 0.0f;
 		if(g_cfg.predictStrength > 150.0f)	g_cfg.predictStrength = 150.0f;
+		if(g_cfg.lockCameraAxis < 0 || g_cfg.lockCameraAxis > 11) g_cfg.lockCameraAxis = 1;
+		if(g_cfg.lockAutoCircle < 100.0f)	g_cfg.lockAutoCircle = 100.0f;
+		if(g_cfg.lockAutoCone < 5.0f)		g_cfg.lockAutoCone = 5.0f;
+		if(g_cfg.lockAutoCone > 180.0f)		g_cfg.lockAutoCone = 180.0f;
+		if(g_cfg.dotSkin < 0 || g_cfg.dotSkin > 3) g_cfg.dotSkin = 0;
+		if(g_cfg.dotColor < 0 || g_cfg.dotColor > 5) g_cfg.dotColor = 0;
+		if(g_cfg.dotSize < 30.0f)			g_cfg.dotSize = 30.0f;
+		if(g_cfg.dotSize > 400.0f)			g_cfg.dotSize = 400.0f;
+		if(g_cfg.dotOpacity < 10.0f)		g_cfg.dotOpacity = 10.0f;
+		if(g_cfg.dotOpacity > 100.0f)		g_cfg.dotOpacity = 100.0f;
+		if(g_cfg.dotTdmType < 0 || g_cfg.dotTdmType > 2) g_cfg.dotTdmType = 0;
 
 		if(g_cfg.updateMs < 1)		g_cfg.updateMs = 1;
 		if(g_cfg.updateMs > 50)		g_cfg.updateMs = 50;
@@ -540,6 +580,21 @@ namespace
 	volatile LONG	g_active	= 0;		// 1 = sessao de combate em curso (o corpo encara o alvo mais proximo)
 	volatile LONG	g_shiftHeld = 0;		// Shift (ou outra tecla de ShiftKeys) carregado
 	volatile DWORD	g_lastAttackTick = 0;	// ultimo toque de ataque
+	float			g_findCenter[3] = { 0.0f, 0.0f, 0.0f };		// centro do corpo do alvo do SoftTarget (para o ponto no ecra)
+	float			g_lockCenter[3] = { 0.0f, 0.0f, 0.0f };		// centro do corpo do alvo do lock-on
+
+	// Handle de uma referencia (0 se falhar). O jogo so lista os hostis; para os outros cria-se aqui.
+	UInt32 HandleFor(Actor * a)
+	{
+		if(!a || !g_cfg.createHandles) return 0;
+		__try
+		{
+			UInt32 h = 0;
+			CreateRefHandleByREFR(&h, (TESObjectREFR *)a);
+			return h;
+		}
+		__except(EXCEPTION_EXECUTE_HANDLER) { return 0; }
+	}
 
 	// Inimigos que o proprio jogo ja tem em combate com o jogador (PlayerCharacter::hostileHandles,
 	// offset 0x630: ponteiro + capacidade + tamanho). Ajuda com reanimados e invocados.
@@ -569,10 +624,43 @@ namespace
 		return n;
 	}
 
+	// Posicao de cada no do esqueleto do ator (o "corpo"): devolve quantos pontos escreveu em pts (x,y,z).
+	int CollectPoints(Actor * actor, float * pts, int maxPts)
+	{
+		NiNode * root = actor->GetNiNode();
+		if(!root) return 0;
+		const NiPoint3 pos = Engine::Position(actor);
+		NiNode * stack[96];
+		int sp = 0, n = 0, visited = 0;
+		stack[sp++] = root;
+		while(sp > 0 && n < maxPts && visited < 700)
+		{
+			NiNode * nd = stack[--sp];
+			++visited;
+			const NiPoint3 & p = nd->m_worldTransform.pos;
+			const float ex = p.x - pos.x, ey = p.y - pos.y, ez = p.z - pos.z;
+			if(ex * ex + ey * ey + ez * ez < 2000.0f * 2000.0f)			// ignora nos perdidos na origem do mundo
+			{
+				pts[n * 3] = p.x; pts[n * 3 + 1] = p.y; pts[n * 3 + 2] = p.z;
+				++n;
+			}
+			const NiTArray<NiAVObject *> & ch = nd->m_children;
+			for(UInt16 i = 0; i < ch.m_emptyRunStart; ++i)
+			{
+				NiAVObject * c = ch.m_data[i];
+				if(!c) continue;
+				NiNode * cn = c->GetAsNiNode();
+				if(cn && sp < 96) stack[sp++] = cn;
+			}
+		}
+		return n;
+	}
+
 	DWORD g_lastActorLog = 0;
 
 	// Devolve true se encontrou um alvo; escreve a guinada, a inclinacao (positiva = para cima),
-	// o formID e o handle (0 se o jogo nao o lista).
+	// o formID e o handle. O alvo e SEMPRE o inimigo mais proximo, medido pela parte do corpo mais perto
+	// de ti (qualquer osso: cabeca, pernas, asas, cauda) e nao pelo centro; a guinada aponta para essa parte.
 	bool FindTarget(Actor * player, float * outYaw, float * outPitchUp, UInt32 * outId, UInt32 * outHandle)
 	{
 		TESObjectCELL * cell = Engine::ParentCell(player);
@@ -592,7 +680,9 @@ namespace
 		if(g_cfg.probe && GetTickCount() - g_lastActorLog > 1000) { dbg = true; g_lastActorLog = GetTickCount(); }
 
 		float bestScore = 1e30f;
-		bool found = false;
+		Actor * bestActor = NULL;
+		int bestListed = -1;
+		float bestYaw = 0.0f, bestC[3] = { 0.0f, 0.0f, 0.0f }, bestNear = 0.0f;
 
 		// A lista de referencias da celula e cell->objectList (GameForms.h do SKSE 1.7.3, offset 0x4C):
 		// ponteiro para os dados + dois contadores. Usa-se o MENOR dos dois, que e sempre o tamanho.
@@ -612,11 +702,10 @@ namespace
 			if(!actor) continue;
 
 			const NiPoint3 pos = Engine::Position(actor);
-			const float dx = pos.x - me.x;
-			const float dy = pos.y - me.y;
-			const float dz = pos.z - me.z;
-			const float dist = sqrtf(dx * dx + dy * dy);
-			if(dist > g_cfg.range || fabsf(dz) > g_cfg.maxHeightDiff) continue;
+			const float cdx = pos.x - me.x;
+			const float cdy = pos.y - me.y;
+			const float cdist = sqrtf(cdx * cdx + cdy * cdy);
+			if(cdist > g_cfg.range + 800.0f) continue;						// o corpo pode ser enorme (dragoes): margem larga
 
 			const UInt32 life = Engine::LifeState(actor);
 
@@ -628,55 +717,84 @@ namespace
 			// Hostil ao jogador: funcao do proprio jogo OU presente na lista de hostis do jogador.
 			const bool hostile = listed || CALL_MEMBER_FN(actor, IsHostileToActor)(player);
 
-			if(dbg && dbgLines < 8)
-			{
-				++dbgLines;
-				_MESSAGE("probe-actor: formID %08X dist %.0f dz %.0f life=%u hostile=%d listed=%d", actor->formID, dist, dz, (unsigned)life, hostile ? 1 : 0, listed ? 1 : 0);
-			}
-
 			// Vivos (0) ou, se permitido, em "reanimacao" (4); o resto (morto, a morrer, inconsciente...) nao.
 			if(life != 0 && !(g_cfg.allowReanimated && life == 4)) continue;
 			if(!hostile) continue;
 			if(g_cfg.requireCombat && !listed && !actor->IsInCombat()) continue;
 
-			const float yaw = atan2f(dx, dy);
+			// Corpo: ponto mais perto (na horizontal) e centro do corpo.
+			float pts[3 * 128];
+			const int n = CollectPoints(actor, pts, 128);
+			float nd = cdist, nx = pos.x, ny = pos.y, nz = pos.z;
+			float c[3] = { pos.x, pos.y, pos.z + g_cfg.aimHeight };
+			if(n >= 3)
+			{
+				nd = 1e30f;
+				float sx = 0.0f, sy = 0.0f, sz = 0.0f;
+				for(int q = 0; q < n; ++q)
+				{
+					const float qx = pts[q * 3], qy = pts[q * 3 + 1], qz = pts[q * 3 + 2];
+					const float ddx = qx - me.x, ddy = qy - me.y;
+					const float dd = sqrtf(ddx * ddx + ddy * ddy);
+					if(dd < nd) { nd = dd; nx = qx; ny = qy; nz = qz; }
+					sx += qx; sy += qy; sz += qz;
+				}
+				c[0] = sx / n; c[1] = sy / n; c[2] = sz / n;
+			}
+
+			if(dbg && dbgLines < 8)
+			{
+				++dbgLines;
+				_MESSAGE("probe-actor: formID %08X center-dist %.0f body-dist %.0f points %d life=%u hostile=%d listed=%d", actor->formID, cdist, nd, n, (unsigned)life, hostile ? 1 : 0, listed ? 1 : 0);
+			}
+
+			if(nd > g_cfg.range) continue;
+			if(fabsf(nz - me.z) > g_cfg.maxHeightDiff && fabsf(c[2] - me.z) > g_cfg.maxHeightDiff) continue;
+
+			// Guinada para a parte mais perto (se estiver colada ao jogador, para o centro, para nao tremer).
+			float yaw = (nd > 25.0f) ? atan2f(nx - me.x, ny - me.y) : atan2f(c[0] - me.x, c[1] - me.y);
 			const float off = fabsf(WrapPi(yaw - facing));
 
 			float score;
 			if(cone)
 			{
 				if(off > halfCone) continue;
-				score = dist * (1.0f + off / (kPi * 0.5f));
+				score = nd * (1.0f + off / (kPi * 0.5f));
 			}
 			else
 			{
-				score = dist;											// circulo: o mais proximo, em qualquer direcao
+				score = nd;													// circulo: o mais proximo, em qualquer direcao
 			}
 
-			// Histerese opcional: o alvo atual so e trocado se outro for claramente mais perto.
-			if(actor->formID == g_lastTargetId)
-			{
-				if(g_cfg.stickyTarget && g_active) score = -1.0f;		// sequencia de golpes: mantem o alvo enquanto for valido
-				else if(g_cfg.switchMargin > 0.0f) score *= (1.0f - g_cfg.switchMargin / 100.0f);
-			}
+			// Margem opcional de troca (0 = sempre o mais proximo).
+			if(actor->formID == g_lastTargetId && g_cfg.switchMargin > 0.0f) score *= (1.0f - g_cfg.switchMargin / 100.0f);
 
 			if(score < bestScore)
 			{
 				bestScore = score;
-				*outYaw = yaw;
-				*outId = actor->formID;
-				*outHandle = (listedAt >= 0) ? hostileHandles[listedAt] : 0;
-
-				const float aimZ = (pos.z + g_cfg.aimHeight) - (me.z + g_cfg.playerAimHeight);
-				float up = atan2f(aimZ, dist > 1.0f ? dist : 1.0f);
-				if(up >  limitRad) up =  limitRad;
-				if(up < -limitRad) up = -limitRad;
-				*outPitchUp = up;
-
-				found = true;
+				bestActor = actor;
+				bestListed = listedAt;
+				bestYaw = yaw;
+				bestNear = nd;
+				bestC[0] = c[0]; bestC[1] = c[1]; bestC[2] = c[2];
 			}
 		}
-		return found;
+
+		if(!bestActor) return false;
+
+		*outYaw = bestYaw;
+		*outId = bestActor->formID;
+		*outHandle = (bestListed >= 0) ? hostileHandles[bestListed] : HandleFor(bestActor);
+
+		const float hx = bestC[0] - me.x, hy = bestC[1] - me.y;
+		const float hd = sqrtf(hx * hx + hy * hy);
+		float up = atan2f(bestC[2] - (me.z + g_cfg.playerAimHeight), hd > 1.0f ? hd : 1.0f);
+		if(up >  limitRad) up =  limitRad;
+		if(up < -limitRad) up = -limitRad;
+		*outPitchUp = up;
+		g_findCenter[0] = bestC[0]; g_findCenter[1] = bestC[1]; g_findCenter[2] = bestC[2];
+		(void)bestNear;
+		return true;
 	}
 
 	// Chamada tambem pela thread de rotacao: protegida contra leituras invalidas.
@@ -720,6 +838,17 @@ namespace
 	}
 
 
+	// Camera de deslocamento (perfil TDM): com a rotacao livre ligada (byte 0xB4, ligado pelo Coeus) a camera fica em
+	// corpo + deslocamento (0xAC). Quando NOS giramos o corpo 'step', tira-se o mesmo ao deslocamento: a camera fica
+	// parada e o rato continua a mexer so a camera. Nao forcamos o 0xB4 (o jogo/Coeus reescrevem-no); so usamos
+	// o modo quando ele ja esta ligado.
+	void CameraHold(UInt8 * cs, float step)
+	{
+		if(!cs) return;
+		float * off = (float *)(cs + 0xAC);
+		*off = WrapPi(*off - step);
+	}
+
 	// ------------------------------------------------------------------ botoes
 	bool	g_holdLeft = false, g_holdRight = false, g_holdExtra = false;
 	bool	g_kFwd = false, g_kBack = false, g_kLeft = false, g_kRight = false;
@@ -738,7 +867,7 @@ namespace
 	float			g_lockOff[3] = { 0.0f, 0.0f, 80.0f };	// centro do corpo menos a posicao do ator
 	float			g_lockVel[3] = { 0.0f, 0.0f, 0.0f };	// velocidade estimada do alvo (unidades por segundo)
 	float			g_lockPrev[3] = { 0.0f, 0.0f, 0.0f };
-	int				g_camAxis = 1;				// eixo da camera que aponta para a frente (0..11), calibrado em terceira pessoa
+	int				g_camAxis = 1;				// eixo da camera que aponta para a frente (0..11): fixo, vem de LockCameraAxis (1 = coluna Y)
 
 	bool IsFirstPerson()
 	{
@@ -746,8 +875,8 @@ namespace
 		return cam && cam->cameraState && cam->cameraState->stateId == PlayerCamera::kCameraState_FirstPerson;
 	}
 
-	// Raio da mira: origem na camera, direcao para a frente. O eixo "frente" da matriz da camera e descoberto sozinho
-	// em terceira pessoa (o que melhor aponta da camera para o personagem) e fica guardado.
+	// Raio da mira: origem na camera, direcao para a frente. O eixo "frente" da matriz e fixo (LockCameraAxis, padrao 1 =
+	// coluna Y; nos registos coincidia a 100% com a direcao camera -> personagem). Sem calibracao continua: era ela que oscilava.
 	bool CameraRay(PlayerCharacter * player, float * o, float * d)
 	{
 		__try
@@ -767,28 +896,8 @@ namespace
 					cand[a + 9][r] = -t.rot.data[a][r];
 				}
 
-			if(ThirdPersonStatePtr())
-			{
-				const NiPoint3 pp = Engine::Position(player);
-				const float v[3] = { pp.x - o[0], pp.y - o[1], (pp.z + g_cfg.playerAimHeight) - o[2] };
-				const float len = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-				if(len > 60.0f)
-				{
-					float best = 0.0f, cur = -1.0f;
-					int bi = -1;
-					for(int k = 0; k < 12; ++k)
-					{
-						const float dp = (cand[k][0] * v[0] + cand[k][1] * v[1] + cand[k][2] * v[2]) / len;
-						if(k == g_camAxis) cur = dp;
-						if(dp > best) { best = dp; bi = k; }
-					}
-					if(bi >= 0 && bi != g_camAxis && best > 0.8f && best > cur + 0.02f)
-					{
-						g_camAxis = bi;
-						_MESSAGE("lock: camera forward axis calibrated (candidate %d, match %.2f)", bi, best);
-					}
-				}
-			}
+			const int ax = g_cfg.lockCameraAxis;
+			g_camAxis = (ax >= 0 && ax < 12) ? ax : 1;
 
 			const float dx = cand[g_camAxis][0], dy = cand[g_camAxis][1], dz = cand[g_camAxis][2];
 			const float dl = sqrtf(dx * dx + dy * dy + dz * dz);
@@ -809,38 +918,6 @@ namespace
 		if(c >  1.0f) c =  1.0f;
 		if(c < -1.0f) c = -1.0f;
 		return acosf(c);
-	}
-
-	// Posicao de cada no do esqueleto do ator (o "corpo"): devolve quantos pontos escreveu em pts (x,y,z).
-	int CollectPoints(Actor * actor, float * pts, int maxPts)
-	{
-		NiNode * root = actor->GetNiNode();
-		if(!root) return 0;
-		const NiPoint3 pos = Engine::Position(actor);
-		NiNode * stack[96];
-		int sp = 0, n = 0, visited = 0;
-		stack[sp++] = root;
-		while(sp > 0 && n < maxPts && visited < 700)
-		{
-			NiNode * nd = stack[--sp];
-			++visited;
-			const NiPoint3 & p = nd->m_worldTransform.pos;
-			const float ex = p.x - pos.x, ey = p.y - pos.y, ez = p.z - pos.z;
-			if(ex * ex + ey * ey + ez * ez < 2000.0f * 2000.0f)			// ignora nos perdidos na origem do mundo
-			{
-				pts[n * 3] = p.x; pts[n * 3 + 1] = p.y; pts[n * 3 + 2] = p.z;
-				++n;
-			}
-			const NiTArray<NiAVObject *> & ch = nd->m_children;
-			for(UInt16 i = 0; i < ch.m_emptyRunStart; ++i)
-			{
-				NiAVObject * c = ch.m_data[i];
-				if(!c) continue;
-				NiNode * cn = c->GetAsNiNode();
-				if(cn && sp < 96) stack[sp++] = cn;
-			}
-		}
-		return n;
 	}
 
 	// Avalia o corpo do ator: angulo minimo entre a mira e qualquer ponto do corpo, e o centro do corpo.
@@ -964,7 +1041,16 @@ namespace
 				if(ang > acquireRad) continue;
 				score = ang + dist * 0.00001f;						// empate: o mais perto
 			}
-			else score = dist;
+			else
+			{
+				score = dist;
+				// Escolha automatica: ate ao alcance circular qualquer direcao (tambem atras); mais longe so a frente da camera.
+				if(dist > g_cfg.lockAutoCircle)
+				{
+					const float yaw = atan2f(dx, dy), cyaw = atan2f(d[0], d[1]);
+					if(fabsf(WrapPi(yaw - cyaw)) > g_cfg.lockAutoCone * kPi / 180.0f) continue;
+				}
+			}
 
 			if(score < bestScore) { bestScore = score; best = a; bestAng = ang; }
 		}
@@ -1108,6 +1194,7 @@ namespace
 			g_lockActor = f;
 			g_targetHandle = 0;
 			for(int j = 0; j < hc; ++j) if(hid[j] == f->formID) { g_targetHandle = (LONG)hh[j]; break; }
+			if(!g_targetHandle) g_targetHandle = (LONG)HandleFor(f);
 		}
 
 		Actor * a = g_lockActor;
@@ -1185,6 +1272,7 @@ namespace
 			}
 		}
 		g_aimX = ax; g_aimY = ay; g_aimZ = az;
+		g_lockCenter[0] = pos.x + g_lockOff[0]; g_lockCenter[1] = pos.y + g_lockOff[1]; g_lockCenter[2] = pos.z + g_lockOff[2];
 
 		// 5) guinada e inclinacao que o corpo (e a camera) devem tomar
 		const float hx = ax - me.x, hy = ay - me.y;
@@ -1205,6 +1293,454 @@ namespace
 	{
 		__try { LockTick(player, now); }
 		__except(EXCEPTION_EXECUTE_HANDLER) { g_lockActor = NULL; }
+	}
+
+
+	// ------------------------------------------------------------------ ponto / reticula no ecra
+	// Desenhado dentro do HUD do jogo (menu "HUD Menu") por um clip criado aqui. Tudo o que toca na interface corre na
+	// thread do jogo (tarefa de UI do SKSE), nunca na nossa thread de rotacao.
+	//  - dotSkin 0 / 1: desenhado pelo proprio plugin (sem ficheiros);
+	//  - dotSkin 2: reticula do Simple Lock-On (LockOnMenu.swf: LockOnWidget.SetTargetPos / Hide);
+	//  - dotSkin 3: reticula do TDM (TDM_Widgets.swf + TDM_Assets0.swf: Widgets.TDM_TargetLockReticle).
+	volatile LONG	g_dotShow = 0;
+	volatile float	g_dotWX = 0.0f, g_dotWY = 0.0f, g_dotWZ = 0.0f;
+	volatile LONG	g_dotPending = 0;
+	volatile DWORD	g_dotQueuedAt = 0;
+	volatile LONG	g_dotShown = 0;
+	volatile LONG	g_dotDisabled = 0;
+	LONG			g_dotFaults = 0;
+
+	struct DotCtx
+	{
+		int		state;			// 0 = sem clip, 1 = a carregar um .swf, 2 = pronto
+		int		skin;			// skin com que o clip foi criado
+		int		fallback;		// 1 = o .swf nao carregou: desenha o ponto simples
+		int		cand;			// indice do caminho em tentativa
+		DWORD	t0;				// inicio da tentativa
+		DWORD	createdAt;
+		void *	view;
+		bool	shown;
+		bool	playPending;	// TDM: falta tocar a animacao de entrada
+		DWORD	hideAt;			// TDM: depois disto o clip fica invisivel
+		DWORD	lastCheck;
+		int		drawnColor;
+		int		drawnSkin;
+		bool	loggedFrustum;
+	};
+	DotCtx g_dot;
+
+	// O widget do Simple Lock-On poe Stage.scaleMode = "noScale" e Stage.align = "TL" no palco INTEIRO do HUD.
+	// Guarda-se o que la estava antes de o carregar e repoe-se depois (para nao deslocar o resto do HUD).
+	char	g_stageScale[40] = { 0 };
+	char	g_stageAlign[40] = { 0 };
+	bool	g_stageSaved = false;
+
+	void SaveStage(GFxMovieView * view)
+	{
+		g_stageSaved = false;
+		GFxValue a, b;
+		if(view->GetVariable(&a, "Stage.scaleMode") && a.GetType() == GFxValue::kType_String && a.GetString())
+		{
+			strncpy_s(g_stageScale, sizeof(g_stageScale), a.GetString(), _TRUNCATE);
+			if(view->GetVariable(&b, "Stage.align") && b.GetType() == GFxValue::kType_String && b.GetString())
+			{
+				strncpy_s(g_stageAlign, sizeof(g_stageAlign), b.GetString(), _TRUNCATE);
+				g_stageSaved = true;
+			}
+		}
+		_MESSAGE("dot: HUD stage was scaleMode='%s' align='%s'%s", g_stageSaved ? g_stageScale : "?", g_stageSaved ? g_stageAlign : "?", g_stageSaved ? "" : " (could not read, will not restore)");
+	}
+
+	void RestoreStage(GFxMovieView * view)
+	{
+		if(!g_stageSaved) return;
+		GFxValue a, b;
+		a.SetString(g_stageScale);
+		b.SetString(g_stageAlign);
+		view->SetVariable("Stage.scaleMode", &a, 0);
+		view->SetVariable("Stage.align", &b, 0);
+		_MESSAGE("dot: HUD stage restored to scaleMode='%s' align='%s'", g_stageScale, g_stageAlign);
+	}
+
+	const int kDotColors[6] = { 0xFFFFFF, 0xFF3030, 0xFFE040, 0x40E0FF, 0x50FF50, 0xFF9020 };
+	const char * kUrlsSimple[] = { "SoftTarget/LockOnReticle.swf", "Interface/SoftTarget/LockOnReticle.swf", "LockOnMenu.swf", "Interface/LockOnMenu.swf" };
+	const char * kUrlsTdm[]    = { "TrueDirectionalMovement/TDM_Widgets.swf", "Interface/TrueDirectionalMovement/TDM_Widgets.swf" };
+
+	bool IsObj(const GFxValue & v) { return v.GetType() >= GFxValue::kType_Object; }
+
+	void CallN(GFxValue & o, const char * fn, int n, double a, double b, double c, double d)
+	{
+		GFxValue args[4], res;
+		args[0].SetNumber(a); args[1].SetNumber(b); args[2].SetNumber(c); args[3].SetNumber(d);
+		o.Invoke(fn, &res, args, (UInt32)n);
+	}
+
+	void CallNone(GFxValue & o, const char * fn)
+	{
+		GFxValue dummy[1], res;
+		o.Invoke(fn, &res, dummy, 0);
+	}
+
+	void DrawCircle(GFxValue & clip, double r)
+	{
+		const double kc = r / cos(22.5 * kPi / 180.0);
+		CallN(clip, "moveTo", 2, r, 0.0, 0.0, 0.0);
+		for(int k = 0; k < 8; ++k)
+		{
+			const double a1 = (k * 45.0 + 22.5) * kPi / 180.0, a2 = (k + 1) * 45.0 * kPi / 180.0;
+			CallN(clip, "curveTo", 4, kc * cos(a1), kc * sin(a1), r * cos(a2), r * sin(a2));
+		}
+	}
+
+	void DrawDotShape(GFxValue & clip, int skin, int rgb)
+	{
+		CallNone(clip, "clear");
+		if(skin == 1)
+		{
+			CallN(clip, "lineStyle", 3, 2.5, (double)rgb, 100.0, 0.0);
+			DrawCircle(clip, 15.0);
+			CallNone(clip, "lineStyle");
+			CallN(clip, "beginFill", 2, (double)rgb, 100.0, 0.0, 0.0);
+			DrawCircle(clip, 3.0);
+			CallNone(clip, "endFill");
+		}
+		else
+		{
+			CallN(clip, "lineStyle", 3, 1.5, 0.0, 60.0, 0.0);
+			CallN(clip, "beginFill", 2, (double)rgb, 100.0, 0.0, 0.0);
+			DrawCircle(clip, 4.5);
+			CallNone(clip, "endFill");
+		}
+	}
+
+	// Tangentes do meio-campo de visao (horizontal e vertical), do frustum da NiCamera; reserva: worldFOV.
+	bool CameraTan(float * tanH, float * tanV)
+	{
+		PlayerCamera * cam = PlayerCamera::GetSingleton();
+		if(!cam || !cam->cameraNode) return false;
+		NiNode * n = cam->cameraNode;
+		NiCamera * nc = DYNAMIC_CAST(n, NiAVObject, NiCamera);
+		if(!nc)
+		{
+			const NiTArray<NiAVObject *> & ch = n->m_children;
+			for(UInt16 i = 0; i < ch.m_emptyRunStart && !nc; ++i)
+			{
+				NiAVObject * c = ch.m_data[i];
+				if(c) nc = DYNAMIC_CAST(c, NiAVObject, NiCamera);
+			}
+		}
+		if(nc)
+		{
+			const NiFrustum & f = nc->m_frustum;
+			if(f.m_fNear > 0.0001f && f.m_fRight > f.m_fLeft && f.m_fTop > f.m_fBottom)
+			{
+				const float h = (f.m_fRight - f.m_fLeft) * 0.5f / f.m_fNear, v = (f.m_fTop - f.m_fBottom) * 0.5f / f.m_fNear;
+				if(h > 0.2f && h < 4.0f && v > 0.1f && v < 4.0f)
+				{
+					*tanH = h; *tanV = v;
+					if(!g_dot.loggedFrustum) { g_dot.loggedFrustum = true; _MESSAGE("dot: camera frustum tanH %.3f tanV %.3f (h-fov %.1f deg)", h, v, 2.0f * atanf(h) * 180.0f / kPi); }
+					return true;
+				}
+			}
+		}
+		const float fov = cam->worldFOV;
+		if(fov > 10.0f && fov < 150.0f)
+		{
+			*tanH = tanf(fov * 0.5f * kPi / 180.0f);
+			*tanV = *tanH * 9.0f / 16.0f;
+			if(!g_dot.loggedFrustum) { g_dot.loggedFrustum = true; _MESSAGE("dot: NiCamera frustum not found, using worldFOV %.1f (assumed horizontal, 16:9)", fov); }
+			return true;
+		}
+		return false;
+	}
+
+	// Ponto do mundo -> coordenadas normalizadas (-1..1) no ecra. Falha se estiver atras da camera.
+	bool ProjectToScreen(PlayerCharacter * player, float wx, float wy, float wz, float * ndcX, float * ndcY, float * dist)
+	{
+		float o[3], d[3];
+		if(!CameraRay(player, o, d)) return false;
+		float rx = d[1], ry = -d[0];						// direita = frente x cima(0,0,1)
+		const float rl = sqrtf(rx * rx + ry * ry);
+		if(rl < 1e-4f) return false;
+		rx /= rl; ry /= rl;
+		const float ux = ry * d[2], uy = -rx * d[2], uz = rx * d[1] - ry * d[0];	// cima = direita x frente
+		const float vx = wx - o[0], vy = wy - o[1], vz = wz - o[2];
+		const float x = vx * rx + vy * ry;
+		const float y = vx * ux + vy * uy + vz * uz;
+		const float z = vx * d[0] + vy * d[1] + vz * d[2];
+		if(z < 10.0f) return false;
+		float tH = 1.0f, tV = 0.5625f;
+		if(!CameraTan(&tH, &tV)) return false;
+		*ndcX = x / (z * tH);
+		*ndcY = y / (z * tV);
+		*dist = sqrtf(vx * vx + vy * vy + vz * vz);
+		return true;
+	}
+
+	void DotSetVisible(GFxMovieView * view, const char * path, bool vis)
+	{
+		GFxValue c;
+		if(!view->GetVariable(&c, path) || !IsObj(c)) return;
+		GFxValue::DisplayInfo di;
+		di.SetVisible(vis);
+		c.SetDisplayInfo(&di);
+	}
+
+	void DotFail(const char * why)
+	{
+		_MESSAGE("dot: %s", why);
+	}
+
+	void DotUpdateInner()
+	{
+		DotCtx & s = g_dot;
+		const DWORD now = GetTickCount();
+		const bool want = (g_dotShow != 0);
+
+		if(!want && s.state == 0) { g_dotShown = 0; return; }			// nada a fazer: nem se cria o clip
+
+		MenuManager * mm = MenuManager::GetSingleton();
+		UIStringHolder * ui = UIStringHolder::GetSingleton();
+		if(!mm || !ui) return;
+		GFxMovieView * view = mm->GetMovieView(&ui->hudMenu);
+		if(!view) { s.state = 0; s.shown = false; g_dotShown = 0; return; }
+		if(view != (GFxMovieView *)s.view) { s.view = view; s.state = 0; s.shown = false; s.fallback = 0; s.cand = 0; }
+
+		int skin = g_cfg.dotSkin;
+		if(s.fallback) skin = 0;
+
+		// O clip pode ter desaparecido (carregar um save recria o HUD) ou a skin pode ter mudado.
+		if(s.state != 0 && (now - s.lastCheck) > 700)
+		{
+			s.lastCheck = now;
+			GFxValue c;
+			if(!view->GetVariable(&c, "_root.SoftTargetDot") || !IsObj(c)) { s.state = 0; s.shown = false; }
+			else if(s.skin != skin)
+			{
+				CallNone(c, "removeMovieClip");
+				s.state = 0; s.shown = false;
+			}
+		}
+
+		// Criar o clip.
+		if(s.state == 0)
+		{
+			if(!want) { g_dotShown = 0; return; }
+			GFxValue root, clip;
+			if(!view->GetVariable(&root, "_root") || !IsObj(root)) { DotFail("cannot reach _root of the HUD"); return; }
+			{
+				GFxValue old;
+				if(view->GetVariable(&old, "_root.SoftTargetDot") && IsObj(old)) CallNone(old, "removeMovieClip");
+			}
+			GFxValue args[2];
+			args[0].SetString("SoftTargetDot");
+			args[1].SetNumber(24000.0);
+			if(!root.Invoke("createEmptyMovieClip", &clip, args, 2) || !IsObj(clip)) { DotFail("createEmptyMovieClip failed"); return; }
+
+			s.skin = skin;
+			s.t0 = now; s.createdAt = now; s.lastCheck = now; s.shown = false; s.playPending = false; s.hideAt = 0;
+			s.drawnColor = -1; s.drawnSkin = -1;
+
+			if(skin <= 1)
+			{
+				s.state = 2;
+				_MESSAGE("dot: ready (drawn by the plugin, skin %d)", skin);
+			}
+			else
+			{
+				const char ** urls = (skin == 2) ? kUrlsSimple : kUrlsTdm;
+				const int nUrls = (skin == 2) ? (int)(sizeof(kUrlsSimple) / sizeof(kUrlsSimple[0])) : (int)(sizeof(kUrlsTdm) / sizeof(kUrlsTdm[0]));
+				if(s.cand >= nUrls) s.cand = 0;
+				if(skin == 2) SaveStage(view);
+				GFxValue a1[1], r;
+				a1[0].SetString(urls[s.cand]);
+				clip.Invoke("loadMovie", &r, a1, 1);
+				s.state = 1;
+				_MESSAGE("dot: loading '%s' (skin %d)", urls[s.cand], skin);
+			}
+			return;
+		}
+
+		// A carregar um .swf: espera que o conteudo apareca; se nao aparecer, tenta o caminho seguinte.
+		if(s.state == 1)
+		{
+			GFxValue clip;
+			if(!view->GetVariable(&clip, "_root.SoftTargetDot") || !IsObj(clip)) { s.state = 0; return; }
+			bool ready = false;
+			if(s.skin == 2)
+			{
+				GFxValue w;
+				if(view->GetVariable(&w, "_root.SoftTargetDot.widget") && IsObj(w))
+				{
+					GFxValue r;
+					view->Invoke("_root.SoftTargetDot.widget.Hide", &r, (GFxValue *)NULL, 0);
+					RestoreStage(view);
+					ready = true;
+				}
+			}
+			else
+			{
+				GFxValue a3[3], ret;
+				a3[0].SetString("TDM_TargetLockReticle");
+				a3[1].SetString("ret");
+				a3[2].SetNumber(1.0);
+				if(clip.Invoke("attachMovie", &ret, a3, 3) && IsObj(ret))
+				{
+					GFxValue a2[2], r;
+					a2[0].SetNumber((double)g_cfg.dotTdmType);
+					a2[1].SetNumber((double)g_cfg.dotOpacity);
+					ret.Invoke("loadConfig", &r, a2, 2);
+					GFxValue::DisplayInfo di;
+					di.SetVisible(false);
+					ret.SetDisplayInfo(&di);
+					ready = true;
+				}
+			}
+			if(ready)
+			{
+				s.state = 2;
+				_MESSAGE("dot: .swf ready after %lu ms (try %d)", (unsigned long)(now - s.t0), s.cand + 1);
+			}
+			else if(now - s.t0 > 2500)
+			{
+				const int nUrls = (s.skin == 2) ? (int)(sizeof(kUrlsSimple) / sizeof(kUrlsSimple[0])) : (int)(sizeof(kUrlsTdm) / sizeof(kUrlsTdm[0]));
+				++s.cand;
+				if(s.cand >= nUrls)
+				{
+					DotFail("no .swf could be loaded (check Data\\Interface) - using the plain dot instead");
+					CallNone(clip, "removeMovieClip");
+					s.fallback = 1; s.state = 0; s.cand = 0;
+				}
+				else
+				{
+					const char ** urls = (s.skin == 2) ? kUrlsSimple : kUrlsTdm;
+					GFxValue a1[1], r;
+					a1[0].SetString(urls[s.cand]);
+					clip.Invoke("loadMovie", &r, a1, 1);
+					s.t0 = now;
+					_MESSAGE("dot: trying '%s'", urls[s.cand]);
+				}
+			}
+			return;
+		}
+
+		// Pronto: mostrar / esconder / posicionar.
+		float ndcX = 0.0f, ndcY = 0.0f, dist = 0.0f;
+		bool visible = false;
+		if(want)
+		{
+			PlayerCharacter * player = Engine::Player();
+			if(player) visible = ProjectToScreen(player, g_dotWX, g_dotWY, g_dotWZ, &ndcX, &ndcY, &dist);
+			if(visible && (fabsf(ndcX) > 1.15f || fabsf(ndcY) > 1.15f)) visible = false;		// fora do ecra
+		}
+
+		GRectF vr = view->GetVisibleFrameRect();
+		float vx0 = vr.left, vy0 = vr.top, vw = vr.right - vr.left, vh = vr.bottom - vr.top;
+		if(!(vw > 100.0f) || !(vh > 100.0f)) { vx0 = 0.0f; vy0 = 0.0f; vw = 1280.0f; vh = 720.0f; }
+		const float xs = vx0 + (ndcX * 0.5f + 0.5f) * vw;
+		const float ys = vy0 + (0.5f - ndcY * 0.5f) * vh;
+		const double scale = g_cfg.dotSize;
+		const double alpha = g_cfg.dotOpacity;
+
+		if(s.skin <= 1)
+		{
+			GFxValue clip;
+			if(!view->GetVariable(&clip, "_root.SoftTargetDot") || !IsObj(clip)) { s.state = 0; return; }
+			const int rgb = kDotColors[(g_cfg.dotColor >= 0 && g_cfg.dotColor < 6) ? g_cfg.dotColor : 0];
+			if(s.drawnColor != rgb || s.drawnSkin != s.skin) { DrawDotShape(clip, s.skin, rgb); s.drawnColor = rgb; s.drawnSkin = s.skin; }
+			GFxValue::DisplayInfo di;
+			di.SetVisible(visible);
+			if(visible) { di.SetPosition(xs, ys); di.SetScale(scale, scale); di.SetAlpha(alpha); }
+			clip.SetDisplayInfo(&di);
+		}
+		else if(s.skin == 2)
+		{
+			GFxValue r;
+			if(visible)
+			{
+				float sw = vw, sh = vh;
+				GFxValue v;
+				if(view->GetVariable(&v, "Stage.width") && v.GetType() == GFxValue::kType_Number && v.GetNumber() > 100.0) sw = (float)v.GetNumber();
+				if(view->GetVariable(&v, "Stage.height") && v.GetType() == GFxValue::kType_Number && v.GetNumber() > 100.0) sh = (float)v.GetNumber();
+				GFxValue a3[3];
+				a3[0].SetNumber(xs - sw * 0.5f);
+				a3[1].SetNumber(ys - sh * 0.5f);
+				a3[2].SetNumber(dist);
+				view->Invoke("_root.SoftTargetDot.widget.SetTargetPos", &r, a3, 3);
+			}
+			else view->Invoke("_root.SoftTargetDot.widget.Hide", &r, (GFxValue *)NULL, 0);
+		}
+		else
+		{
+			GFxValue ret;
+			if(!view->GetVariable(&ret, "_root.SoftTargetDot.ret") || !IsObj(ret)) { s.state = 0; return; }
+			if(visible)
+			{
+				if(!s.shown) { s.playPending = true; s.hideAt = 0; }
+				GFxValue::DisplayInfo di;
+				di.SetVisible(true); di.SetPosition(xs, ys); di.SetScale(scale, scale);
+				ret.SetDisplayInfo(&di);
+				if(s.playPending && now - s.createdAt > 150)
+				{
+					GFxValue t[1], f[1], r;
+					t[0].SetBool(true); f[0].SetBool(false);
+					ret.Invoke("updateData", &r, t, 1);
+					ret.Invoke("updateData", &r, f, 1);
+					s.playPending = false;
+				}
+			}
+			else if(s.shown)
+			{
+				GFxValue t[1], r;
+				t[0].SetBool(true);
+				ret.Invoke("updateData", &r, t, 1);			// animacao de saida
+				s.hideAt = now + 450;
+			}
+			if(!visible && s.hideAt && now >= s.hideAt)
+			{
+				GFxValue::DisplayInfo di;
+				di.SetVisible(false);
+				ret.SetDisplayInfo(&di);
+				s.hideAt = 0;
+			}
+		}
+		s.shown = visible;
+		g_dotShown = visible ? 1 : 0;
+	}
+
+	void DotUpdate()
+	{
+		g_dotPending = 0;
+		if(g_dotDisabled) return;
+		__try { DotUpdateInner(); }
+		__except(EXCEPTION_EXECUTE_HANDLER)
+		{
+			++g_dotFaults;
+			_MESSAGE("dot: fault #%ld in the interface update", g_dotFaults);
+			g_dot.state = 0; g_dot.shown = false;
+			if(g_dotFaults >= 5) { g_dotDisabled = 1; _MESSAGE("dot: disabled after repeated faults"); }
+		}
+	}
+
+	class DotTask : public UIDelegate_v1
+	{
+	public:
+		virtual void Run(void) { DotUpdate(); }
+		virtual void Dispose(void) { delete this; }
+	};
+
+	// Pede (no maximo a cada ~16 ms, ou a cada 400 ms em repouso) uma atualizacao do ponto na thread do jogo.
+	void DotPump(DWORD now)
+	{
+		if(!g_taskIface || g_dotDisabled) return;
+		const bool busy = g_dotShow || g_dotShown;
+		static DWORD lastQ = 0;
+		if(now - lastQ < (busy ? 16u : 400u)) return;
+		if(g_dotPending && (now - g_dotQueuedAt) < 500) return;
+		lastQ = now;
+		g_dotPending = 1;
+		g_dotQueuedAt = now;
+		g_taskIface->AddUITask(new DotTask());
 	}
 
 	bool MatchKey(UInt32 device, int code, int cfgCode)
@@ -1370,6 +1906,23 @@ namespace
 			}
 			if(!g_active) noTargetSince = 0;
 
+			// Ponto no ecra: diz-se onde esta o alvo; o desenho e feito pela thread da interface (DotPump).
+			{
+				bool show = false;
+				if(g_lockOwn && g_cfg.dotLock && g_lockActor)
+				{
+					g_dotWX = g_lockCenter[0]; g_dotWY = g_lockCenter[1]; g_dotWZ = g_lockCenter[2];
+					show = true;
+				}
+				else if(!g_lockOwn && g_active && g_cfg.dotSoft && !g_cfg.logOnly)
+				{
+					g_dotWX = g_findCenter[0]; g_dotWY = g_findCenter[1]; g_dotWZ = g_findCenter[2];
+					show = true;
+				}
+				g_dotShow = show ? 1 : 0;
+				DotPump(now);
+			}
+
 			// Registo: inicio e fim de cada sessao de combate (e o motivo do fim).
 			if(g_active && !prevActive)
 			{
@@ -1432,6 +1985,11 @@ namespace
 				else if(phase == 2) phase = 1;
 
 				const float stepYaw = StepToward(rot.z, g_targetYaw, true, dt, maxRad, g_cfg.smoothing);
+				if(coeusProfile && g_cfg.cameraHoldTdm)
+				{
+					UInt8 * hcs = ThirdPersonStatePtr();
+					if(hcs && *(hcs + 0xB4)) CameraHold(hcs, stepYaw);		// o deslocamento perde o que o corpo ganha
+				}
 				rot.z = WrapPi(rot.z + stepYaw);
 
 				// Mira vertical: so o corpo (bracos).
@@ -1444,16 +2002,27 @@ namespace
 					if(!firstPerson) tiltUsed = true;		// em primeira pessoa rot.x e a propria vista: nao se repoe
 				}
 
-				// Lock-on proprio, perfil normal: a camera acompanha o alvo (so quando o jogo a deixa seguir o corpo).
-				if(g_lockOwn && !coeusProfile && g_cfg.lockCameraFollow)
+				// Lock-on proprio: a camera acompanha o alvo (nos dois perfis).
+				//  - camera presa ao corpo (0xB4 = 0): escreve-se o angulo da propria camera;
+				//  - camera de deslocamento (0xB4 = 1, TDM): o deslocamento caminha para (alvo - corpo).
+				if(g_lockOwn && g_cfg.lockCameraFollow)
 				{
 					UInt8 * cs = ThirdPersonStatePtr();
-					if(cs && !*(cs + 0xB4))
+					if(cs)
 					{
-						float cy = *(float *)(cs + 0x5C);
-						cy = WrapPi(cy + StepToward(cy, g_targetYaw, true, dt, maxRad, g_cfg.lockCameraSmooth));
-						*(float *)(cs + 0x5C) = cy;
-						*(float *)(cs + 0x60) = cy;
+						if(!*(cs + 0xB4))
+						{
+							float cy = *(float *)(cs + 0x5C);
+							cy = WrapPi(cy + StepToward(cy, g_targetYaw, true, dt, maxRad, g_cfg.lockCameraSmooth));
+							*(float *)(cs + 0x5C) = cy;
+							*(float *)(cs + 0x60) = cy;
+						}
+						else
+						{
+							float * off = (float *)(cs + 0xAC);
+							const float want = WrapPi(g_targetYaw - rot.z);
+							*off = WrapPi(*off + StepToward(*off, want, true, dt, maxRad, g_cfg.lockCameraSmooth));
+						}
 
 						float o[3], dd[3];
 						if(g_cfg.lockCameraPitch && CameraRay(player, o, dd))
@@ -1596,6 +2165,17 @@ namespace
 		_MESSAGE("probe: state=%u camDist=%.1f fov=%.1f | player rotZ=%.3f rotX=%.3f | camYaw=%.3f freeRot=%d offset=%.3f | lock: ours=%d slo=%d coeusLock=%d coeusExt=%d | active=%d move=%d shift=%d own=%d",
 				 st ? (unsigned)st->stateId : 0xFFFFu, camDist, fov, rot.z, rot.x, camYawV, frFlag, frOff,
 				 (int)g_lockActive, sloNow, cLock, cExt, (int)g_active, (int)g_moveHeld, (int)g_shiftHeld, (int)g_lockOwn);
+
+		{
+			float o[3], d[3];
+			if(ThirdPersonStatePtr() && CameraRay(player, o, d))
+			{
+				const NiPoint3 pp = Engine::Position(player);
+				const float v[3] = { pp.x - o[0], pp.y - o[1], (pp.z + g_cfg.playerAimHeight) - o[2] };
+				const float len = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+				if(len > 1.0f) _MESSAGE("probe-cam: axis %d match with camera->player %.2f | dot show=%d shown=%d state=%d skin=%d fallback=%d", g_camAxis, (d[0] * v[0] + d[1] * v[1] + d[2] * v[2]) / len, (int)g_dotShow, (int)g_dotShown, g_dot.state, g_dot.skin, g_dot.fallback);
+			}
+		}
 
 		if(st)
 		{
@@ -1809,6 +2389,9 @@ bool SKSEPlugin_Load(const SKSEInterface * skse)
 		_MESSAGE("ABORTING: the messaging interface is not available");
 		return false;
 	}
+
+	g_taskIface = (SKSETaskInterface *)skse->QueryInterface(kInterface_Task);
+	_MESSAGE("task interface: %s", g_taskIface ? "available (the on-screen dot can be drawn)" : "NOT available (no on-screen dot)");
 
 	g_papyrus = (SKSEPapyrusInterface *)skse->QueryInterface(kInterface_Papyrus);
 	if(g_papyrus && g_papyrus->Register(RegisterPapyrus))
