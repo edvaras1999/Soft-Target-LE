@@ -31,7 +31,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.12.1 (ponto: frustum real e diagnostico dos .swf, camera parada com arco, camera do perfil normal compensa o deslocamento, perfil FreeCam/Coeus)"
+#define PLUGIN_VERSION_STR	"0.12.2 (lock cede o corpo ao Coeus sempre, ponto com FOV corrigido, mira no tronco, queda do arco)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -174,7 +174,7 @@ namespace
 		{ "LockCameraSmooth",		'f', &g_cfg.lockCameraSmooth,	8.0f },
 		{ "PredictEnabled",			'i', &g_cfg.predictEnabled,		1.0f },
 		{ "ProjectileSpeed",		'f', &g_cfg.projectileSpeed,	4500.0f },
-		{ "ProjectileGravity",		'f', &g_cfg.projectileGravity,	0.0f },
+		{ "ProjectileGravity",		'f', &g_cfg.projectileGravity,	450.0f },
 		{ "PredictStrength",		'f', &g_cfg.predictStrength,	100.0f },
 		{ "PredictMinDistance",		'f', &g_cfg.predictMinDist,		400.0f },
 		{ "LockCameraAxis",			'i', &g_cfg.lockCameraAxis,		1.0f },
@@ -734,16 +734,18 @@ namespace
 			if(n >= 3)
 			{
 				nd = 1e30f;
-				float sx = 0.0f, sy = 0.0f, sz = 0.0f;
+				float sx = 0.0f, sy = 0.0f, zmin = 1e30f, zmax = -1e30f;
 				for(int q = 0; q < n; ++q)
 				{
 					const float qx = pts[q * 3], qy = pts[q * 3 + 1], qz = pts[q * 3 + 2];
 					const float ddx = qx - me.x, ddy = qy - me.y;
 					const float dd = sqrtf(ddx * ddx + ddy * ddy);
 					if(dd < nd) { nd = dd; nx = qx; ny = qy; nz = qz; }
-					sx += qx; sy += qy; sz += qz;
+					sx += qx; sy += qy;
+					if(qz < zmin) zmin = qz;
+					if(qz > zmax) zmax = qz;
 				}
-				c[0] = sx / n; c[1] = sy / n; c[2] = sz / n;
+				c[0] = sx / n; c[1] = sy / n; c[2] = zmin + 0.65f * (zmax - zmin);		// tronco, nao a media dos ossos
 			}
 
 			if(dbg && dbgLines < 8)
@@ -937,15 +939,18 @@ namespace
 			pts[3] = pos.x; pts[4] = pos.y; pts[5] = pos.z + g_cfg.aimHeight;
 			n = 2;
 		}
-		float minA = 10.0f, cx = 0.0f, cy = 0.0f, cz = 0.0f;
+		float minA = 10.0f, cx = 0.0f, cy = 0.0f, minZ = 1e30f, maxZ = -1e30f;
 		for(int i = 0; i < n; ++i)
 		{
 			const float a = AngleToRay(o, d, pts[i * 3], pts[i * 3 + 1], pts[i * 3 + 2]);
 			if(a < minA) minA = a;
-			cx += pts[i * 3]; cy += pts[i * 3 + 1]; cz += pts[i * 3 + 2];
+			cx += pts[i * 3]; cy += pts[i * 3 + 1];
+			if(pts[i * 3 + 2] < minZ) minZ = pts[i * 3 + 2];
+			if(pts[i * 3 + 2] > maxZ) maxZ = pts[i * 3 + 2];
 		}
 		*outAngle = minA;
-		outCenter[0] = cx / n; outCenter[1] = cy / n; outCenter[2] = cz / n;
+		// Ponto de mira: centro horizontal do corpo, a 65% da altura (peito de um humano; para criaturas grandes, o tronco).
+		outCenter[0] = cx / n; outCenter[1] = cy / n; outCenter[2] = minZ + 0.65f * (maxZ - minZ);
 		return true;
 	}
 
@@ -1156,6 +1161,23 @@ namespace
 		LockOff(why);
 	}
 
+	// Arco ou besta numa das maos?
+	bool BowEquipped(PlayerCharacter * player)
+	{
+		ActorProcessManager * pm = player->processManager;
+		if(!pm) return false;
+		for(int h = 0; h < 2; ++h)
+		{
+			TESForm * f = pm->equippedObject[h];
+			if(f && f->formType == kFormType_Weapon)
+			{
+				const UInt8 type = ((TESObjectWEAP *)f)->gameData.type;
+				if(type == TESObjectWEAP::GameData::kType_Bow || type == TESObjectWEAP::GameData::kType_CrossBow) return true;
+			}
+		}
+		return false;
+	}
+
 	// A usar arco / besta / magia com um botao de ataque carregado? (sem funcoes do SKSE: leitura direta)
 	bool RangedHeld(PlayerCharacter * player)
 	{
@@ -1196,9 +1218,10 @@ namespace
 			for(int i = 0; i < n; ++i) if(list[i] && list[i]->formID == (UInt32)g_lockId) { f = list[i]; break; }
 			if(!f) { LockOff("target left the area"); return; }
 			g_lockActor = f;
-			g_targetHandle = 0;
-			for(int j = 0; j < hc; ++j) if(hid[j] == f->formID) { g_targetHandle = (LONG)hh[j]; break; }
-			if(!g_targetHandle) g_targetHandle = (LONG)HandleFor(f);
+			LONG newHandle = 0;
+			for(int j = 0; j < hc; ++j) if(hid[j] == f->formID) { newHandle = (LONG)hh[j]; break; }
+			if(!newHandle) newHandle = (LONG)HandleFor(f);
+			if(newHandle) g_targetHandle = newHandle;			// so se muda quando ha um valor valido
 		}
 
 		Actor * a = g_lockActor;
@@ -1270,7 +1293,7 @@ namespace
 				const float k = g_cfg.predictStrength / 100.0f;
 				ax += g_lockVel[0] * t * k;
 				ay += g_lockVel[1] * t * k;
-				az += g_lockVel[2] * t * k + 0.5f * g_cfg.projectileGravity * t * t;
+				az += g_lockVel[2] * t * k + (BowEquipped(player) ? 0.5f * g_cfg.projectileGravity * t * t : 0.0f);
 				if(g_cfg.verbose)
 					_MESSAGE("predict: dist %.0f t %.2fs lead (%.0f, %.0f, %.0f)", dist, t, g_lockVel[0] * t * k, g_lockVel[1] * t * k, g_lockVel[2] * t * k);
 			}
@@ -1334,6 +1357,7 @@ namespace
 		bool	loggedFrustum;
 	};
 	DotCtx g_dot;
+	float g_viewAspect = 16.0f / 9.0f;
 
 	// O widget do Simple Lock-On poe Stage.scaleMode = "noScale" e Stage.align = "TL" no palco INTEIRO do HUD.
 	// Guarda-se o que la estava antes de o carregar e repoe-se depois (para nao deslocar o resto do HUD).
@@ -1473,6 +1497,20 @@ namespace
 		return true;
 	}
 
+	// Procura o frustum no objeto e, ate 4 niveis, nos descendentes.
+	bool FrustumSearch(NiAVObject * o, int depth, float * h, float * v)
+	{
+		if(!o) return false;
+		if(FrustumRaw(o, h, v)) return true;
+		if(depth >= 4) return false;
+		NiNode * nd = o->GetAsNiNode();
+		if(!nd) return false;
+		const NiTArray<NiAVObject *> & ch = nd->m_children;
+		for(UInt16 i = 0; i < ch.m_emptyRunStart && i < 12; ++i)
+			if(ch.m_data[i] && FrustumSearch(ch.m_data[i], depth + 1, h, v)) return true;
+		return false;
+	}
+
 	// Tangentes do meio-campo de visao (horizontal e vertical), do frustum da NiCamera; reserva: worldFOV.
 	bool CameraTan(float * tanH, float * tanV)
 	{
@@ -1482,18 +1520,11 @@ namespace
 		{
 			// 1) leitura direta: o proprio no e cada filho (a NiCamera costuma ser o 1o filho)
 			float h = 0.0f, v = 0.0f;
-			int where = -2;
-			if(FrustumRaw(n, &h, &v)) where = -1;
-			else
-			{
-				const NiTArray<NiAVObject *> & ch0 = n->m_children;
-				for(UInt16 i = 0; i < ch0.m_emptyRunStart && i < 8 && where == -2; ++i)
-					if(ch0.m_data[i] && FrustumRaw(ch0.m_data[i], &h, &v)) where = (int)i;
-			}
+			int where = FrustumSearch((NiAVObject *)n, 0, &h, &v) ? 0 : -2;
 			if(where != -2)
 			{
 				*tanH = h; *tanV = v;
-				if(!g_dot.loggedFrustum) { g_dot.loggedFrustum = true; _MESSAGE("dot: camera frustum read directly (%s %d): tanH %.3f tanV %.3f (h-fov %.1f deg, v-fov %.1f deg)", where < 0 ? "node itself" : "child", where, h, v, 2.0f * atanf(h) * 180.0f / kPi, 2.0f * atanf(v) * 180.0f / kPi); }
+				if(!g_dot.loggedFrustum) { g_dot.loggedFrustum = true; _MESSAGE("dot: camera frustum found (depth search): tanH %.3f tanV %.3f (h-fov %.1f deg, v-fov %.1f deg)", h, v, 2.0f * atanf(h) * 180.0f / kPi, 2.0f * atanf(v) * 180.0f / kPi); }
 				return true;
 			}
 		}
@@ -1524,9 +1555,10 @@ namespace
 		const float fov = cam->worldFOV;
 		if(fov > 10.0f && fov < 150.0f)
 		{
-			*tanH = tanf(fov * 0.5f * kPi / 180.0f);
-			*tanV = *tanH * 9.0f / 16.0f;
-			if(!g_dot.loggedFrustum) { g_dot.loggedFrustum = true; _MESSAGE("dot: NiCamera frustum not found, using worldFOV %.1f (assumed horizontal, 16:9)", fov); }
+			// O worldFOV do Skyrim e o campo horizontal para 4:3; o vertical sai disso e o horizontal real, do formato do ecra.
+			*tanV = tanf(fov * 0.5f * kPi / 180.0f) * 0.75f;
+			*tanH = *tanV * g_viewAspect;
+			if(!g_dot.loggedFrustum) { g_dot.loggedFrustum = true; _MESSAGE("dot: NiCamera frustum not found, using worldFOV %.1f as horizontal-4:3 (aspect %.3f): tanH %.3f tanV %.3f", fov, g_viewAspect, *tanH, *tanV); }
 			return true;
 		}
 		return false;
@@ -1733,6 +1765,7 @@ namespace
 		GRectF vr = view->GetVisibleFrameRect();
 		float vx0 = vr.left, vy0 = vr.top, vw = vr.right - vr.left, vh = vr.bottom - vr.top;
 		if(!(vw > 100.0f) || !(vh > 100.0f)) { vx0 = 0.0f; vy0 = 0.0f; vw = 1280.0f; vh = 720.0f; }
+		g_viewAspect = vw / vh;
 		const float xs = vx0 + (ndcX * 0.5f + 0.5f) * vw;
 		const float ys = vy0 + (0.5f - ndcY * 0.5f) * vh;
 		const double scale = g_cfg.dotSize;
@@ -2037,7 +2070,9 @@ namespace
 
 			// Perfil TDM a encarar o alvo: pede ao Coeus para largar o corpo (so com handle valido, para nao
 			// deixar o Coeus/LockOn num estado de lock-on "fantasma").
-			const bool wantYield = g_cfg.coeusYield && coeusProfile && g_coeusExternal && g_active && !suppress && !sprintHold && !g_lockActive && g_targetHandle != 0;
+			// Com o lock proprio o Coeus larga SEMPRE o corpo (senao os dois rodam o corpo em sentidos opostos e o personagem anda em circulos);
+			// para o SoftTarget isso depende de CoeusYield. Sem sprint: correr devolve o corpo ao Coeus.
+			const bool wantYield = (g_cfg.coeusYield || g_lockOwn) && coeusProfile && g_coeusExternal && g_active && !suppress && !sprintHold && !g_lockActive && g_targetHandle != 0;
 			if(wantYield)
 			{
 				if(!yielding || now - lastYield > 150)
@@ -2084,8 +2119,8 @@ namespace
 				if(coeusProfile && g_cfg.cameraHoldTdm)
 				{
 					UInt8 * hcs = ThirdPersonStatePtr();
-					// Camera livre (0xB4 ligado) ou mira com arco/magia (camera presa ao corpo): o deslocamento perde o que o corpo ganha.
-					if(hcs && (*(hcs + 0xB4) || RangedHeld(player)))
+					// Camera livre (0xB4 ligado), fora da mira com arco/magia (la o Coeus faz a sua propria compensacao): o deslocamento perde o que o corpo ganha.
+					if(hcs && *(hcs + 0xB4) && !RangedHeld(player))
 					{
 						CameraHold(hcs, stepYaw);
 						if(g_cfg.verbose && fabsf(stepYaw) > 0.001f) _MESSAGE("camhold: step %.3f free=%d offset=%.3f", stepYaw, (int)*(hcs + 0xB4), *(float *)(hcs + 0xAC));
