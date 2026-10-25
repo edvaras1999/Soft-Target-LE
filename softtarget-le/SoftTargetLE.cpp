@@ -31,7 +31,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.12.2 (lock cede o corpo ao Coeus sempre, ponto com FOV corrigido, mira no tronco, queda do arco)"
+#define PLUGIN_VERSION_STR	"0.12.3 (FreeCam sem yield, rotacao do input, sprint mantem a mira, previsao com interceptacao, ajuste do ponto de mira)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -119,6 +119,16 @@ namespace
 		int		dotColor;		// 0 branco, 1 vermelho, 2 amarelo, 3 ciano, 4 verde, 5 laranja
 		float	dotOpacity;		// opacidade, %
 		int		dotTdmType;		// tipo da reticula do TDM (0..2)
+		// ---- v0.12.3
+		int		moveRemap;		// perfil FreeCam: o corpo encara o alvo e o input de andar e rodado para continuar relativo ao ecra
+		int		sprintKeepsAim;	// perfil FreeCam: correr nao larga a mira nem o lock-on
+		int		mvRegion;		// onde esta o vetor de movimento (-1 = descobrir sozinho; valor do registo)
+		int		mvOffset;		// deslocamento em bytes dentro da regiao
+		float	aimOffX;		// graus: o alvo fica a direita (+) ou a esquerda (-) do centro (camera do lock, perfil normal)
+		float	aimOffY;		// graus: o alvo fica acima (+) ou abaixo (-) do centro
+		float	spellSpeed;		// velocidade de reserva dos feiticos, unidades por segundo
+		float	speedScale;		// % aplicada a velocidade do projetil (ajuste fino da previsao)
+		int		useFormSpeed;	// 1 = le a velocidade do feitico nos dados do jogo
 	};
 	Config g_cfg;
 
@@ -176,7 +186,7 @@ namespace
 		{ "ProjectileSpeed",		'f', &g_cfg.projectileSpeed,	4500.0f },
 		{ "ProjectileGravity",		'f', &g_cfg.projectileGravity,	450.0f },
 		{ "PredictStrength",		'f', &g_cfg.predictStrength,	100.0f },
-		{ "PredictMinDistance",		'f', &g_cfg.predictMinDist,		400.0f },
+		{ "PredictMinDistance",		'f', &g_cfg.predictMinDist,		150.0f },
 		{ "LockCameraAxis",			'i', &g_cfg.lockCameraAxis,		1.0f },
 		{ "LockAutoCircleRange",	'f', &g_cfg.lockAutoCircle,		900.0f },
 		{ "LockAutoConeDegrees",	'f', &g_cfg.lockAutoCone,		60.0f },
@@ -189,6 +199,15 @@ namespace
 		{ "DotColor",				'i', &g_cfg.dotColor,			0.0f },
 		{ "DotOpacity",				'f', &g_cfg.dotOpacity,			100.0f },
 		{ "DotTdmType",				'i', &g_cfg.dotTdmType,			0.0f },
+		{ "MoveRemap",				'i', &g_cfg.moveRemap,			1.0f },
+		{ "SprintKeepsAim",			'i', &g_cfg.sprintKeepsAim,		1.0f },
+		{ "MoveVecRegion",			'i', &g_cfg.mvRegion,			-1.0f },
+		{ "MoveVecOffset",			'i', &g_cfg.mvOffset,			0.0f },
+		{ "AimOffsetX",				'f', &g_cfg.aimOffX,			0.0f },
+		{ "AimOffsetY",				'f', &g_cfg.aimOffY,			0.0f },
+		{ "SpellProjectileSpeed",	'f', &g_cfg.spellSpeed,			2500.0f },
+		{ "ProjectileSpeedScale",	'f', &g_cfg.speedScale,			100.0f },
+		{ "UseSpellDataSpeed",		'i', &g_cfg.useFormSpeed,		1.0f },
 	};
 	const int kNumOpts = sizeof(g_opts) / sizeof(g_opts[0]);
 
@@ -300,6 +319,13 @@ namespace
 		if(g_cfg.lockLoseSightMs < 0)		g_cfg.lockLoseSightMs = 0;
 		if(g_cfg.lockCameraSmooth < 1.0f)	g_cfg.lockCameraSmooth = 1.0f;
 		if(g_cfg.projectileSpeed < 500.0f)	g_cfg.projectileSpeed = 500.0f;
+		if(g_cfg.spellSpeed < 300.0f)		g_cfg.spellSpeed = 300.0f;
+		if(g_cfg.speedScale < 20.0f)		g_cfg.speedScale = 20.0f;
+		if(g_cfg.speedScale > 300.0f)		g_cfg.speedScale = 300.0f;
+		if(g_cfg.aimOffX < -20.0f)			g_cfg.aimOffX = -20.0f;
+		if(g_cfg.aimOffX >  20.0f)			g_cfg.aimOffX =  20.0f;
+		if(g_cfg.aimOffY < -20.0f)			g_cfg.aimOffY = -20.0f;
+		if(g_cfg.aimOffY >  20.0f)			g_cfg.aimOffY =  20.0f;
 		if(g_cfg.predictStrength < 0.0f)	g_cfg.predictStrength = 0.0f;
 		if(g_cfg.predictStrength > 150.0f)	g_cfg.predictStrength = 150.0f;
 		if(g_cfg.lockCameraAxis < 0 || g_cfg.lockCameraAxis > 11) g_cfg.lockCameraAxis = 1;
@@ -1201,6 +1227,204 @@ namespace
 		return false;
 	}
 
+
+	// ------------------------------------------------------------------ velocidade do projetil (previsao)
+	// Feiticos: a velocidade vem do projetil do primeiro efeito (dados do jogo); se nao houver, a de reserva do ini.
+	float SpellSpeedFromData(PlayerCharacter * player)
+	{
+		__try
+		{
+			ActorProcessManager * pm = player->processManager;
+			if(!pm) return 0.0f;
+			TESForm * f = pm->equippedObject[g_holdRight ? 1 : 0];
+			if(!f || f->formType != kFormType_Spell) return 0.0f;
+			MagicItem * mi = (SpellItem *)f;
+			for(UInt32 i = 0; i < mi->effectItemList.count && i < 8; ++i)
+			{
+				MagicItem::EffectItem * ei = mi->effectItemList.arr.entries[i];
+				if(!ei || !ei->mgef) continue;
+				BGSProjectile * pr = ei->mgef->properties.projectile;
+				if(!pr) continue;
+				const float sp = pr->data.unk08;
+				if(sp > 200.0f && sp < 30000.0f) return sp;
+			}
+		}
+		__except(EXCEPTION_EXECUTE_HANDLER) { }
+		return 0.0f;
+	}
+
+	float ProjectileSpeedNow(PlayerCharacter * player)
+	{
+		float sp = 0.0f;
+		if(BowEquipped(player)) sp = g_cfg.projectileSpeed;
+		else
+		{
+			if(g_cfg.useFormSpeed) sp = SpellSpeedFromData(player);
+			if(sp <= 0.0f) sp = g_cfg.spellSpeed;
+		}
+		sp *= g_cfg.speedScale / 100.0f;
+		return sp < 300.0f ? 300.0f : sp;
+	}
+
+	// ------------------------------------------------------------------ rotacao do input (perfil FreeCam / Coeus)
+	// Com o corpo preso ao alvo, o jogo le as teclas relativas AO CORPO. Para o movimento continuar relativo ao ECRA
+	// (W = para cima no ecra, A = esquerda...), roda-se o vetor de movimento pela diferenca camera - corpo.
+	// O vetor (dois floats seguidos) nao esta nos cabecalhos do SKSE: descobre-se sozinho comparando a memoria dos
+	// controlos do jogador com as teclas carregadas (parado = 0, a andar = comprimento 1, e a direcao certa).
+	const int kMvRegions = 14;				// 0 = o proprio PlayerControls; 1..13 = os seus manipuladores de input
+	const int kMvWords0 = 128;				// 0x200 bytes
+	const int kMvWordsH = 24;				// 0x60 bytes
+	struct MvCand { UInt8 dir[4]; UInt16 move; UInt16 idle; };
+	MvCand			g_mvCand[kMvRegions][kMvWords0];
+	int				g_mvMoveSamples = 0, g_mvIdleSamples = 0;
+	int				g_mvRegion = -1, g_mvWord = -1;
+	volatile LONG	g_mvFound = 0, g_mvWant = 0;
+	volatile DWORD	g_mvWantTick = 0;
+	DWORD			g_mvLastLearn = 0;
+	long			g_mvWrites = 0, g_mvSeen = 0, g_mvKept = 0;
+	float			g_mvLastX = 0.0f, g_mvLastY = 0.0f;
+	volatile LONG	g_mvHaveLast = 0;
+
+	inline float W2F(UInt32 w) { float f; memcpy(&f, &w, 4); return f; }
+
+	UInt32 * MvBase(int region, int * words)
+	{
+		PlayerControls * pc = PlayerControls::GetSingleton();
+		if(!pc) return NULL;
+		if(region == 0) { *words = kMvWords0; return (UInt32 *)pc; }
+		PlayerInputHandler * h = pc->inputHandlers[region - 1];
+		if(!h) return NULL;
+		*words = kMvWordsH;
+		return (UInt32 *)h;
+	}
+
+	bool MvReadRegion(int region, UInt32 * dst, int * words)
+	{
+		__try
+		{
+			UInt32 * b = MvBase(region, words);
+			if(!b) return false;
+			for(int i = 0; i < *words; ++i) dst[i] = b[i];
+			return true;
+		}
+		__except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+	}
+
+	void MvLearn(DWORD now)
+	{
+		if(g_mvFound || now - g_mvLastLearn < 12) return;
+		g_mvLastLearn = now;
+		const int nd = (g_kFwd ? 1 : 0) + (g_kBack ? 1 : 0) + (g_kLeft ? 1 : 0) + (g_kRight ? 1 : 0);
+		if(nd > 2) return;
+		const bool idle = (nd == 0);
+		int dir = -1; float ex = 0.0f, ey = 0.0f;
+		if(nd == 1)
+		{
+			if(g_kFwd) { dir = 0; ey = 1.0f; }
+			else if(g_kBack) { dir = 1; ey = -1.0f; }
+			else if(g_kLeft) { dir = 2; ex = -1.0f; }
+			else { dir = 3; ex = 1.0f; }
+		}
+		if(idle) ++g_mvIdleSamples; else ++g_mvMoveSamples;
+
+		for(int r = 0; r < kMvRegions; ++r)
+		{
+			UInt32 w[kMvWords0];
+			int n = 0;
+			if(!MvReadRegion(r, w, &n)) continue;
+			for(int i = 0; i + 1 < n; ++i)
+			{
+				const float x = W2F(w[i]), y = W2F(w[i + 1]);
+				if(!(x == x) || !(y == y)) continue;
+				if(fabsf(x) > 1.05f || fabsf(y) > 1.05f) continue;
+				MvCand & c = g_mvCand[r][i];
+				const float len = sqrtf(x * x + y * y);
+				if(idle) { if(len < 0.02f && c.idle < 60000) ++c.idle; }
+				else
+				{
+					if(len > 0.9f && len < 1.1f && c.move < 60000) ++c.move;
+					if(dir >= 0 && fabsf(x - ex) < 0.12f && fabsf(y - ey) < 0.12f && c.dir[dir] < 250) ++c.dir[dir];
+				}
+			}
+		}
+		if(g_mvMoveSamples < 40 || g_mvIdleSamples < 40) return;
+
+		int bestR = -1, bestI = -1, bestScore = -1, ties = 0, bestDirs = 0;
+		for(int r = 0; r < kMvRegions; ++r)
+		{
+			const int nw = (r == 0) ? kMvWords0 : kMvWordsH;
+			for(int i = 0; i + 1 < nw; ++i)
+			{
+				const MvCand & c = g_mvCand[r][i];
+				if(c.move < g_mvMoveSamples * 8 / 10 || c.idle < g_mvIdleSamples * 8 / 10) continue;
+				int dirs = 0;
+				for(int d = 0; d < 4; ++d) if(c.dir[d] >= 5) ++dirs;
+				const int score = dirs * 100000 + c.move + c.idle;
+				if(score > bestScore) { bestScore = score; bestR = r; bestI = i; bestDirs = dirs; ties = 0; }
+				else if(score == bestScore) ++ties;
+			}
+		}
+		if(bestR < 0)
+		{
+			// nada com a forma certa: recomeca a recolher (as contagens antigas ficam, mas as amostras duplicam-se)
+			if(g_mvMoveSamples > 600)
+			{
+				_MESSAGE("input: no movement vector found in the player controls (%d moving / %d idle samples) - the input rotation stays off", g_mvMoveSamples, g_mvIdleSamples);
+				g_mvMoveSamples = -1000000;		// desiste (nao volta a tentar nesta sessao de jogo)
+			}
+			return;
+		}
+		g_mvRegion = bestR; g_mvWord = bestI; g_mvFound = 1;
+		_MESSAGE("input: movement vector found: region %d, byte offset 0x%X (directions matched %d of 4, other equal candidates %d) - to skip the search put MoveVecRegion=%d and MoveVecOffset=%d in the ini",
+				 bestR, bestI * 4, bestDirs, ties, bestR, bestI * 4);
+	}
+
+	// Escreve o vetor ja rodado. Chamado muitas vezes por segundo pela thread do input (o jogo e o Coeus tambem o escrevem).
+	void MvApply(float camYaw, float bodyYaw)
+	{
+		if(!g_mvFound) return;
+		float sx = (g_kRight ? 1.0f : 0.0f) - (g_kLeft ? 1.0f : 0.0f);
+		float sy = (g_kFwd ? 1.0f : 0.0f) - (g_kBack ? 1.0f : 0.0f);
+		if(sx == 0.0f && sy == 0.0f) { g_mvHaveLast = 0; return; }
+		const float l = sqrtf(sx * sx + sy * sy);
+		sx /= l; sy /= l;
+		const float d = WrapPi(camYaw - bodyYaw);
+		const float cs = cosf(d), sn = sinf(d);
+		const float ix = sx * cs + sy * sn;
+		const float iy = -sx * sn + sy * cs;
+		__try
+		{
+			int n = 0;
+			UInt32 * b = MvBase(g_mvRegion, &n);
+			if(!b || g_mvWord + 1 >= n) return;
+			float * v = (float *)(b + g_mvWord);
+			if(g_mvHaveLast) { ++g_mvSeen; if(fabsf(v[0] - g_mvLastX) < 0.001f && fabsf(v[1] - g_mvLastY) < 0.001f) ++g_mvKept; }
+			v[0] = ix; v[1] = iy;
+			g_mvLastX = ix; g_mvLastY = iy; g_mvHaveLast = 1;
+			++g_mvWrites;
+		}
+		__except(EXCEPTION_EXECUTE_HANDLER) { g_mvFound = 0; g_mvRegion = -1; g_mvWord = -1; g_mvMoveSamples = -1000000; }
+	}
+
+	DWORD WINAPI MvThread(LPVOID)
+	{
+		for(;;)
+		{
+			Sleep(1);
+			if(!g_mvFound || !g_mvWant || GetTickCount() - g_mvWantTick > 120) { g_mvHaveLast = 0; continue; }
+			__try
+			{
+				PlayerCharacter * player = Engine::Player();
+				if(!player) continue;
+				float o[3], d[3];
+				if(!CameraRay(player, o, d)) continue;
+				MvApply(atan2f(d[0], d[1]), Engine::Rotation(player).z);
+			}
+			__except(EXCEPTION_EXECUTE_HANDLER) { }
+		}
+		return 0;
+	}
+
 	// Um passo do lock-on proprio (corre na thread de rotacao): valida o alvo, calcula o ponto de mira e a previsao.
 	void LockTick(PlayerCharacter * player, DWORD now)
 	{
@@ -1284,18 +1508,30 @@ namespace
 		g_assist = assist ? 1 : 0;
 		if(assist && g_cfg.predictEnabled)
 		{
-			const float fx = ax - me.x, fy = ay - me.y, fz = az - (me.z + g_cfg.playerAimHeight);
-			const float dist = sqrtf(fx * fx + fy * fy + fz * fz);
+			const float sxp = me.x, syp = me.y, szp = me.z + g_cfg.playerAimHeight;
+			const float d0x = ax - sxp, d0y = ay - syp, d0z = az - szp;
+			const float dist = sqrtf(d0x * d0x + d0y * d0y + d0z * d0z);
 			if(dist > g_cfg.predictMinDist)
 			{
-				float t = dist / g_cfg.projectileSpeed;
-				if(t > 3.0f) t = 3.0f;
+				// Interceptacao: o tempo de voo depende de onde o alvo ESTARA; repete-se ate convergir.
+				const float speed = ProjectileSpeedNow(player);
 				const float k = g_cfg.predictStrength / 100.0f;
-				ax += g_lockVel[0] * t * k;
-				ay += g_lockVel[1] * t * k;
-				az += g_lockVel[2] * t * k + (BowEquipped(player) ? 0.5f * g_cfg.projectileGravity * t * t : 0.0f);
+				const bool bow = BowEquipped(player);
+				float t = dist / speed;
+				float px = ax, py = ay, pz = az;
+				for(int it = 0; it < 6; ++it)
+				{
+					px = ax + g_lockVel[0] * t * k;
+					py = ay + g_lockVel[1] * t * k;
+					pz = az + g_lockVel[2] * t * k * 0.5f;
+					const float dx = px - sxp, dy = py - syp, dz = pz - szp;
+					t = sqrtf(dx * dx + dy * dy + dz * dz) / speed;
+					if(t > 3.0f) { t = 3.0f; break; }
+				}
+				ax = px; ay = py;
+				az = pz + (bow ? 0.5f * g_cfg.projectileGravity * t * t : 0.0f);
 				if(g_cfg.verbose)
-					_MESSAGE("predict: dist %.0f t %.2fs lead (%.0f, %.0f, %.0f)", dist, t, g_lockVel[0] * t * k, g_lockVel[1] * t * k, g_lockVel[2] * t * k);
+					_MESSAGE("predict: dist %.0f speed %.0f t %.2fs lead (%.0f, %.0f, %.0f) %s", dist, speed, t, px - (pos.x + g_lockOff[0]), py - (pos.y + g_lockOff[1]), pz - (pos.z + g_lockOff[2]), bow ? "bow" : "spell");
 			}
 		}
 		g_aimX = ax; g_aimY = ay; g_aimZ = az;
@@ -1965,7 +2201,9 @@ namespace
 			// Correr (Shift + andar) = fugir: a sessao acaba e o corpo volta a ser do jogador / do Coeus.
 			// Com o lock-on proprio o lock continua, mas o corpo e a camera deixam de ser puxados enquanto corre.
 			bool sprintHold = false;
-			if(g_active && g_shiftHeld && g_moveHeld)
+			// FreeCam / Coeus: correr nao larga a mira (ataque em corrida). No perfil normal correr continua a ser fugir.
+			const bool sprintKeeps = coeusProfile && g_cfg.sprintKeepsAim;
+			if(g_active && g_shiftHeld && g_moveHeld && !sprintKeeps)
 			{
 				if(g_lockOwn) sprintHold = true;
 				else { g_endReason = 1; g_active = 0; phase = 0; }
@@ -2066,13 +2304,16 @@ namespace
 
 			// Perfil TDM sem "encarar o alvo": enquanto anda o corpo e do Coeus; so ha um "pulso" depois de cada ataque.
 			// (O lock-on proprio nao usa o pulso: o corpo encara sempre o alvo preso.)
-			const bool suppress = !g_lockOwn && coeusProfile && !g_cfg.coeusYield && g_moveHeld && (now - g_lastAttackTick) >= (DWORD)g_cfg.attackPulseMs;
+			// Com a rotacao do input ativa o corpo encara o alvo mesmo a andar: o movimento continua a ser relativo ao ecra.
+			const bool remapOn = coeusProfile && g_cfg.moveRemap && g_mvFound;
+			const bool suppress = !g_lockOwn && coeusProfile && !remapOn && g_moveHeld && (now - g_lastAttackTick) >= (DWORD)g_cfg.attackPulseMs;
 
 			// Perfil TDM a encarar o alvo: pede ao Coeus para largar o corpo (so com handle valido, para nao
 			// deixar o Coeus/LockOn num estado de lock-on "fantasma").
 			// Com o lock proprio o Coeus larga SEMPRE o corpo (senao os dois rodam o corpo em sentidos opostos e o personagem anda em circulos);
 			// para o SoftTarget isso depende de CoeusYield. Sem sprint: correr devolve o corpo ao Coeus.
-			const bool wantYield = (g_cfg.coeusYield || g_lockOwn) && coeusProfile && g_coeusExternal && g_active && !suppress && !sprintHold && !g_lockActive && g_targetHandle != 0;
+			// 0.12.3: no perfil FreeCam o Coeus NUNCA larga o corpo (largar solta tambem a camera livre e o movimento relativo ao ecra).
+			const bool wantYield = false;
 			if(wantYield)
 			{
 				if(!yielding || now - lastYield > 150)
@@ -2093,6 +2334,19 @@ namespace
 				_MESSAGE("coeus: external lock-on OFF");
 				yielding = false; g_yieldNow = 0;
 			}
+
+			// Rotacao do input: aprende onde esta o vetor de movimento e pede a thread do input para o rodar.
+			if(g_cfg.moveRemap && !g_mvFound)
+			{
+				if(g_cfg.mvRegion >= 0 && g_cfg.mvRegion < kMvRegions && g_cfg.mvOffset >= 0 && g_cfg.mvOffset < 0x200)
+				{
+					g_mvRegion = g_cfg.mvRegion; g_mvWord = g_cfg.mvOffset / 4; g_mvFound = 1;
+					_MESSAGE("input: movement vector from the ini: region %d, byte offset 0x%X", g_mvRegion, g_cfg.mvOffset);
+				}
+				else if(g_mvMoveSamples >= -100000 && GameHasFocus()) MvLearn(now);
+			}
+			g_mvWant = (remapOn && g_active && !suppress && g_moveHeld) ? 1 : 0;
+			g_mvWantTick = now;
 
 			NiPoint3 & rot = Engine::Rotation(player);
 			const float maxRad = g_cfg.turnSpeedDeg * kPi / 180.0f;
@@ -2138,10 +2392,10 @@ namespace
 					if(!firstPerson) tiltUsed = true;		// em primeira pessoa rot.x e a propria vista: nao se repoe
 				}
 
-				// Lock-on proprio: a camera acompanha o alvo (nos dois perfis).
+				// Lock-on proprio: a camera acompanha o alvo (SO no perfil normal; no FreeCam a camera e sempre do rato).
 				//  - camera presa ao corpo (0xB4 = 0): escreve-se o angulo da propria camera;
 				//  - camera de deslocamento (0xB4 = 1, TDM): o deslocamento caminha para (alvo - corpo).
-				if(g_lockOwn && g_cfg.lockCameraFollow)
+				if(g_lockOwn && g_cfg.lockCameraFollow && !coeusProfile)
 				{
 					UInt8 * cs = ThirdPersonStatePtr();
 					if(cs)
@@ -2157,6 +2411,7 @@ namespace
 								if(CameraRay(player, o2, d2))
 									wantYaw = WrapPi(cy + WrapPi(atan2f(g_aimX - o2[0], g_aimY - o2[1]) - atan2f(d2[0], d2[1])));
 							}
+							wantYaw = WrapPi(wantYaw - g_cfg.aimOffX * kPi / 180.0f);		// alvo a direita do centro = camera um pouco mais a esquerda
 							cy = WrapPi(cy + StepToward(cy, wantYaw, true, dt, maxRad, g_cfg.lockCameraSmooth));
 							*(float *)(cs + 0x5C) = cy;
 							*(float *)(cs + 0x60) = cy;
@@ -2173,6 +2428,7 @@ namespace
 						{
 							const float hx = g_aimX - o[0], hy = g_aimY - o[1];
 							float want = -atan2f(g_aimZ - o[2], sqrtf(hx * hx + hy * hy) > 1.0f ? sqrtf(hx * hx + hy * hy) : 1.0f);
+							want += g_cfg.aimOffY * kPi / 180.0f;		// alvo acima do centro = camera um pouco mais para baixo
 							if(want >  1.1f) want =  1.1f;
 							if(want < -1.1f) want = -1.1f;
 							float cp = *(float *)(cs + 0x54);
@@ -2327,6 +2583,8 @@ namespace
 			_MESSAGE("probe-move: coeusDirectional=%d yieldRequested=%d ownLock=%d keys F%d B%d L%d R%d shift=%d | body-to-target %.1f deg | profile=%d CoeusYield=%d",
 					 cdir, (int)g_yieldNow, (int)g_lockOwn, (int)g_kFwd, (int)g_kBack, (int)g_kLeft, (int)g_kRight, (int)g_shiftHeld,
 					 WrapPi(g_targetYaw - rot.z) * 180.0f / kPi, g_cfg.profileMode, g_cfg.coeusYield);
+			_MESSAGE("probe-input: remap=%d found=%d region %d offset 0x%X | writes %ld, game left our value %ld of %ld checks (low = the game/Coeus rewrite the vector)",
+					 g_cfg.moveRemap, (int)g_mvFound, g_mvRegion, g_mvWord * 4, g_mvWrites, g_mvKept, g_mvSeen);
 		}
 
 		if(st)
@@ -2498,6 +2756,7 @@ namespace
 				if(!dispatcher) { _MESSAGE("input dispatcher not available - the mod will not work"); break; }
 				dispatcher->AddEventSink(&g_sink);
 				CreateThread(NULL, 0, TurnThread, NULL, 0, NULL);
+				CreateThread(NULL, 0, MvThread, NULL, 0, NULL);
 				_MESSAGE("input receiver registered, turn thread started");
 				break;
 			}
