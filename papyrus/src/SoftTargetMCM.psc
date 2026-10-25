@@ -19,7 +19,7 @@ int ocount
 int lang		; 0 = English, 1 = Portugues
 
 int Function GetVersion()
-	return 8
+	return 9
 EndFunction
 
 Function InitTables()
@@ -57,13 +57,14 @@ EndEvent
 ; Page names follow the chosen language (they refresh the next time the menu is opened).
 Function SetPageNames()
 	lang = SoftTargetNative.GetInt("Language")
-	Pages = new string[6]
+	Pages = new string[7]
 	Pages[0] = T("General", "Geral")
 	Pages[1] = T("Lock-On", "Lock-On")
-	Pages[2] = T("Targeting", "Alvo")
-	Pages[3] = T("Combos and turning", "Combos e giro")
-	Pages[4] = T("Camera and movement", "Camera e movimento")
-	Pages[5] = T("Magic aim", "Mira da magia")
+	Pages[2] = T("On-screen dot", "Ponto no ecrã")
+	Pages[3] = T("Targeting", "Alvo")
+	Pages[4] = T("Combos and turning", "Combos e giro")
+	Pages[5] = T("Camera and movement", "Câmera e movimento")
+	Pages[6] = T("Magic aim", "Mira da magia")
 EndFunction
 
 string Function T(string en, string pt)
@@ -94,10 +95,20 @@ string[] Function MenuChoices(int menuId)
 		r[1] = T("Left button (M2)", "Botão esquerdo (M2)")
 		r[2] = T("Right button (M1)", "Botão direito (M1)")
 		r[3] = T("Both", "Ambos")
-	elseIf menuId == 4
-		r = new string[2]
-		r[0] = T("Follows the target", "Acompanha o alvo")
-		r[1] = T("Stays still", "Fica parada")
+	elseIf menuId == 8
+		r = new string[4]
+		r[0] = T("Dot", "Ponto")
+		r[1] = T("Ring and dot", "Anel e ponto")
+		r[2] = T("Simple Lock-On reticle (.swf)", "Retícula do Simple Lock-On (.swf)")
+		r[3] = T("TDM reticle (.swf)", "Retícula do TDM (.swf)")
+	elseIf menuId == 9
+		r = new string[6]
+		r[0] = T("White", "Branco")
+		r[1] = T("Red", "Vermelho")
+		r[2] = T("Yellow", "Amarelo")
+		r[3] = T("Cyan", "Ciano")
+		r[4] = T("Green", "Verde")
+		r[5] = T("Orange", "Laranja")
 	elseIf menuId == 5
 		r = new string[2]
 		r[0] = T("Off", "Desligado")
@@ -227,10 +238,12 @@ Event OnPageReset(string a_page)
 	elseIf p == 1
 		PageLock()
 	elseIf p == 2
-		PageTargeting()
+		PageDot()
 	elseIf p == 3
-		PageBody()
+		PageTargeting()
 	elseIf p == 4
+		PageBody()
+	elseIf p == 5
 		PageCamera()
 	else
 		PageMagic()
@@ -301,10 +314,10 @@ Function PageGeneral()
 EndFunction
 
 Function PageTargeting()
-	AddHeaderOption(T("Detection area (both profiles)", "Área de deteção (ambos os perfis)"))
+	AddHeaderOption(T("Detection area (the nearest enemy is always chosen)", "Área de deteção (escolhe sempre o inimigo mais próximo)"))
 	AddEmptyOption()
 	AddMenuRow("Shape", T("Shape", "Forma"), 2, 0.0, T("Cone in front of the player, or a full circle around (best with directional or 360 movement).", "Cone à frente do jogador, ou um círculo completo à volta (melhor com movimento direcional ou de 360 graus)."))
-	AddSliderRow("Range", T("Range", "Alcance"), 100.0, 1500.0, 10.0, 450.0, 1.0, 0, "{0}", T("How far an enemy can be and still be picked. 140 is about 2 meters.", "A que distância um inimigo ainda pode ser escolhido. 140 é cerca de 2 metros."))
+	AddSliderRow("Range", T("Range", "Alcance"), 100.0, 1500.0, 10.0, 450.0, 1.0, 0, "{0}", T("How far an enemy can be and still be picked. It is measured to the part of the body closest to you (head, legs, wings, tail), not to its center. 140 is about 2 meters.", "A que distância um inimigo ainda pode ser escolhido. Mede-se até à parte do corpo mais próxima de si (cabeça, pernas, asas, cauda), não até ao centro. 140 é cerca de 2 metros."))
 	AddSliderRow("ConeDegrees", T("Cone angle", "Ângulo do cone"), 30.0, 360.0, 5.0, 140.0, 1.0, 0, "{0}", T("Total width of the cone, in degrees (cone shape only).", "Largura total do cone, em graus (só na forma de cone)."))
 	AddSliderRow("MaxHeightDifference", T("Max height difference", "Diferença máxima de altura"), 100.0, 1500.0, 10.0, 600.0, 1.0, 0, "{0}", T("Enemies higher or lower than this are ignored (stairs, rocks, cliffs).", "Inimigos mais altos ou mais baixos que isto são ignorados (escadas, rochas, penhascos)."))
 	AddHeaderOption(T("Who counts as an enemy", "Quem conta como inimigo"))
@@ -315,8 +328,7 @@ Function PageTargeting()
 	AddEmptyOption()
 	AddHeaderOption(T("Switching targets", "Troca de alvo"))
 	AddEmptyOption()
-	AddToggleRow("StickyTarget", T("Keep target during a combo", "Manter o alvo durante o combo"), 1.0, T("While you keep attacking, the body stays on the same enemy until it dies or leaves the area, instead of jumping between enemies.", "Enquanto continua a atacar, o corpo fica no mesmo inimigo até ele morrer ou sair da área, em vez de saltar entre inimigos."))
-	AddSliderRow("SwitchMarginPercent", T("Switch margin", "Margem de troca"), 0.0, 50.0, 1.0, 0.0, 1.0, 0, "{0} %", T("When not in a combo: how much closer another enemy must be before the target changes.", "Fora de um combo: quanto mais perto outro inimigo tem de estar para o alvo mudar."))
+	AddSliderRow("SwitchMarginPercent", T("Switch margin", "Margem de troca"), 0.0, 50.0, 1.0, 0.0, 1.0, 0, "{0} %", T("0 = the body always follows the nearest enemy. Higher values keep the current target until another is this much closer.", "0 = o corpo segue sempre o inimigo mais próximo. Valores maiores mantêm o alvo atual até outro estar tanto mais perto."))
 	AddSliderRow("RetargetMilliseconds", T("Re-check every", "Reavaliar a cada"), 16.0, 300.0, 4.0, 80.0, 1.0, 1, "{0} ms", T("How often the nearest enemy is re-evaluated while turning. Lower switches faster.", "De quanto em quanto tempo o inimigo mais próximo é reavaliado durante o giro. Menos troca mais depressa."))
 EndFunction
 
@@ -349,12 +361,13 @@ Function PageCamera()
 	if prof == 1
 		AddHeaderOption(T("TDM profile (directional movement)", "Perfil TDM (movimento direcional)"))
 		AddEmptyOption()
-		AddToggleRow("CoeusYield", T("Face the target while moving", "Encarar o alvo enquanto anda"), 1.0, T("During the combat window (or with the lock-on on) Coeus lets go of the body: the character faces the enemy and walks relative to that facing (W = toward the enemy, S = backpedal, A/D = strafe). The camera is not touched. When off, Coeus keeps control while you walk.", "Durante a janela de combate (ou com o lock-on ligado) o Coeus larga o corpo: o personagem encara o inimigo e anda relativo a isso (W = para o inimigo, S = recuar, A/D = lateral). A câmera não é tocada. Desligado, o Coeus mantém o controlo enquanto anda."))
+		AddToggleRow("CoeusYield", T("Face the target while moving", "Encarar o alvo enquanto anda"), 0.0, T("Off (default): Coeus keeps control of the body while you walk. On: during the combat window (or with the lock-on on) Coeus lets go of the body: the character faces the enemy and walks relative to that facing (W = toward the enemy, S = backpedal, A/D = strafe). Works with either setting.", "Desligado (padrão): o Coeus mantém o controlo do corpo enquanto anda. Ligado: durante a janela de combate (ou com o lock-on ligado) o Coeus larga o corpo: o personagem encara o inimigo e anda relativo a isso (W = para o inimigo, S = recuar, A/D = lateral). Funciona com qualquer uma das opções."))
+		AddToggleRow("CameraHoldTdm", T("Keep the camera still when the body turns", "Câmera parada quando o corpo vira"), 1.0, T("When this mod turns the body toward an enemy, the camera stays where you put it and the mouse keeps moving only the camera (the TDM way). Off = the camera follows the turning body.", "Quando este mod vira o corpo para um inimigo, a câmera fica onde a pôs e o rato continua a mexer só a câmera (como no TDM). Desligado = a câmera acompanha o corpo que vira."))
 		AddSliderRow("AttackPulseMs", T("Turn while walking", "Virar enquanto anda"), 0.0, 1500.0, 50.0, 350.0, 0.001, 1, "{2} s", T("Only when 'Face the target while moving' is off: each attack turns the walking body toward the enemy for this long. 0 = never.", "Só quando 'Encarar o alvo enquanto anda' está desligado: cada ataque vira o corpo em movimento para o inimigo durante este tempo. 0 = nunca."))
 	else
 		AddHeaderOption(T("Normal profile (without TDM)", "Perfil normal (sem TDM)"))
 		AddEmptyOption()
-		AddStatusRow(T("Camera options", "Opções da câmera"), T("see Lock-On page", "veja a página Lock-On"), T("In the normal profile the camera options for the lock-on are on the Lock-On page. Outside the lock-on the camera is never touched.", "No perfil normal as opções da câmera do lock-on estão na página Lock-On. Fora do lock-on a câmera nunca é tocada."))
+		AddStatusRow(T("Camera options", "Opções da câmera"), T("see Lock-On page", "veja a página Lock-On"), T("The camera options for the lock-on are on the Lock-On page. Outside the lock-on the camera is never touched.", "As opções da câmera do lock-on estão na página Lock-On. Fora do lock-on a câmera nunca é tocada."))
 	endIf
 EndFunction
 
@@ -371,13 +384,15 @@ Function PageLock()
 	AddSliderRow("LockAcquireDegrees", T("Aim area", "Área da mira"), 5.0, 90.0, 1.0, 30.0, 1.0, 0, "{0} deg", T("How far from the crosshair, in degrees, any part of the enemy's body (head, legs, wings, tail) may be and still be locked. The one closest to the crosshair wins.", "A que distância da mira, em graus, qualquer parte do corpo do inimigo (cabeça, pernas, asas, cauda) pode estar para ser presa. Ganha a que estiver mais perto da mira."))
 	AddToggleRow("LockHostileOnly", T("Only enemies", "Só inimigos"), 1.0, T("If off, any living creature or person can be locked (for example animals when hunting).", "Se desligado, qualquer criatura ou pessoa viva pode ser presa (por exemplo animais na caça)."))
 	AddToggleRow("LockAutoNext", T("Next enemy when target dies", "Próximo inimigo quando o alvo morre"), 1.0, T("When the target dies the lock goes to the nearest enemy instead of turning off.", "Quando o alvo morre o lock passa para o inimigo mais próximo em vez de desligar."))
+	AddSliderRow("LockAutoCircleRange", T("Automatic choice: all-around range", "Escolha automática: alcance em volta"), 200.0, 4000.0, 100.0, 900.0, 1.0, 0, "{0}", T("When the lock picks an enemy by itself, anyone within this distance counts, in any direction (even behind you).", "Quando o lock escolhe um inimigo sozinho, quem estiver dentro desta distância conta, em qualquer direção (até atrás de si)."))
+	AddSliderRow("LockAutoConeDegrees", T("Automatic choice: forward cone", "Escolha automática: cone à frente"), 10.0, 180.0, 5.0, 60.0, 1.0, 0, "{0} deg", T("Beyond the all-around range (up to the lock range) only enemies inside this cone in front of the camera count. The angle is measured to each side of the screen center.", "Além do alcance em volta (até ao alcance do lock) só contam inimigos dentro deste cone à frente da câmera. O ângulo é medido para cada lado do centro do ecrã."))
 	AddHeaderOption(T("Losing the target", "Perder o alvo"))
 	AddEmptyOption()
 	AddSliderRow("LockLoseSightMs", T("Time out of view", "Tempo fora da vista"), 0.0, 5000.0, 100.0, 1500.0, 0.001, 1, "{1} s", T("The lock turns off if the target stays out of view for this long.", "O lock desliga se o alvo ficar fora da vista durante este tempo."))
 	AddSliderRow("LockLoseAngleDegrees", T("Out-of-view angle", "Ângulo de fora da vista"), 30.0, 170.0, 5.0, 75.0, 1.0, 0, "{0} deg", T("The target counts as out of view when its whole body is further than this from the center of the screen. Walls and rocks in between are not detected yet.", "O alvo conta como fora da vista quando o corpo inteiro está mais longe do que isto do centro do ecrã. Paredes e rochas pelo meio ainda não são detetadas."))
-	AddHeaderOption(T("Camera (normal profile)", "Câmera (perfil normal)"))
+	AddHeaderOption(T("Camera", "Câmera"))
 	AddEmptyOption()
-	AddToggleRow("LockCameraFollow", T("Camera follows the target", "Câmera acompanha o alvo"), 1.0, T("With the lock on, the camera turns to the target. In the TDM profile the camera is always left free.", "Com o lock ligado, a câmera vira para o alvo. No perfil TDM a câmera fica sempre livre."))
+	AddToggleRow("LockCameraFollow", T("Camera follows the target", "Câmera acompanha o alvo"), 1.0, T("With the lock on, the camera turns to the target (in both profiles; in the TDM profile through the camera offset, like the target lock of True Directional Movement).", "Com o lock ligado, a câmera vira para o alvo (nos dois perfis; no perfil TDM pelo deslocamento da câmera, como o target lock do True Directional Movement)."))
 	AddToggleRow("LockCameraPitch", T("Camera also looks up/down", "Câmera também sobe/desce"), 1.0, T("The camera tilts up or down toward the target (dragons, high ground). Turn off if the camera behaves strangely.", "A câmera inclina para cima ou para baixo para o alvo (dragões, terreno alto). Desligue se a câmera se portar de forma estranha."))
 	AddSliderRow("LockCameraSmooth", T("Camera speed", "Velocidade da câmera"), 2.0, 20.0, 0.5, 8.0, 1.0, 0, "{1}", T("How fast the camera turns to the target. Higher is faster and less smooth.", "A velocidade com que a câmera vira para o alvo. Mais é mais rápido e menos suave."))
 	AddHeaderOption(T("Shot prediction (only with lock-on)", "Previsão do disparo (só com lock-on)"))
@@ -387,6 +402,18 @@ Function PageLock()
 	AddSliderRow("ProjectileSpeed", T("Projectile speed", "Velocidade do projétil"), 1000.0, 12000.0, 100.0, 4500.0, 1.0, 0, "{0}", T("Speed used to compute the lead, in units per second. Arrows are fast, many spells are slower: lower this for magic.", "Velocidade usada para calcular a antecipação, em unidades por segundo. As flechas são rápidas, muitas magias são mais lentas: baixe isto para magia."))
 	AddSliderRow("ProjectileGravity", T("Projectile drop", "Queda do projétil"), 0.0, 2000.0, 50.0, 0.0, 1.0, 0, "{0}", T("Raises the aim to compensate for the drop at long distance. 0 = no compensation.", "Levanta a mira para compensar a queda a longa distância. 0 = sem compensação."))
 	AddSliderRow("PredictMinDistance", T("Minimum distance", "Distância mínima"), 100.0, 2000.0, 50.0, 400.0, 1.0, 0, "{0}", T("Closer than this there is no prediction.", "Mais perto do que isto não há previsão."))
+EndFunction
+
+Function PageDot()
+	AddHeaderOption(T("On-screen indicator", "Indicador no ecrã"))
+	AddEmptyOption()
+	AddToggleRow("DotLock", T("Show on the locked target", "Mostrar no alvo do lock-on"), 1.0, T("Draws the indicator on the enemy you have locked.", "Desenha o indicador no inimigo que prendeu."))
+	AddToggleRow("DotSoftTarget", T("Show on the SoftTarget enemy", "Mostrar no inimigo do SoftTarget"), 0.0, T("Also draws the indicator on the enemy the body is turning toward while you fight.", "Desenha também o indicador no inimigo para onde o corpo está a virar enquanto luta."))
+	AddMenuRow("DotSkin", T("Appearance", "Aspeto"), 8, 1.0, T("Dot and Ring-and-dot are drawn by the plugin (no files). The Simple Lock-On reticle needs LockOnReticle.swf (or LockOnMenu.swf) in Data\\Interface. The TDM reticle needs TDM_Widgets.swf and TDM_Assets0.swf in Data\\Interface\\TrueDirectionalMovement (the retexture options of that mod change its look). If a file is missing the plain dot is used and the log says so.", "Ponto e Anel e ponto são desenhados pelo plugin (sem ficheiros). A retícula do Simple Lock-On precisa do LockOnReticle.swf (ou LockOnMenu.swf) em Data\\Interface. A retícula do TDM precisa do TDM_Widgets.swf e TDM_Assets0.swf em Data\\Interface\\TrueDirectionalMovement (as opções de retextura desse mod mudam o aspeto). Se faltar um ficheiro usa-se o ponto simples e o registo diz isso."))
+	AddMenuRow("DotColor", T("Color (drawn skins)", "Cor (aspetos desenhados)"), 9, 0.0, T("Color of the dot and ring.", "Cor do ponto e do anel."))
+	AddSliderRow("DotSize", T("Size", "Tamanho"), 30.0, 400.0, 10.0, 100.0, 1.0, 0, "{0} %", T("Size of the indicator.", "Tamanho do indicador."))
+	AddSliderRow("DotOpacity", T("Opacity", "Opacidade"), 10.0, 100.0, 5.0, 100.0, 1.0, 0, "{0} %", T("How solid the indicator is.", "Quão opaco é o indicador."))
+	AddSliderRow("DotTdmType", T("TDM reticle type", "Tipo da retícula do TDM"), 0.0, 2.0, 1.0, 0.0, 1.0, 1, "{0}", T("Reticle type passed to the TDM widget (0, 1 or 2). Only used with the TDM reticle.", "Tipo de retícula passado ao widget do TDM (0, 1 ou 2). Só é usado com a retícula do TDM."))
 EndFunction
 
 Function PageMagic()
