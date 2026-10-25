@@ -19,7 +19,7 @@ int ocount
 int lang		; 0 = English, 1 = Portugues
 
 int Function GetVersion()
-	return 9
+	return 10
 EndFunction
 
 Function InitTables()
@@ -87,8 +87,8 @@ string[] Function MenuChoices(int menuId)
 		r[1] = T("Circle around (360)", "Círculo à volta (360)")
 	elseIf menuId == 7
 		r = new string[2]
-		r[0] = T("Normal (without TDM / Unsheathed off)", "Normal (sem TDM / Unsheathed desligado)")
-		r[1] = T("TDM (Unsheathed on)", "TDM (Unsheathed ligado)")
+		r[0] = T("Normal (vanilla movement / Coeus Unsheathed off)", "Normal (movimento do jogo / Coeus Unsheathed desligado)")
+		r[1] = T("FreeCam / Coeus (Unsheathed on)", "FreeCam / Coeus (Unsheathed ligado)")
 	elseIf menuId == 3
 		r = new string[4]
 		r[0] = T("Off", "Desligado")
@@ -100,7 +100,7 @@ string[] Function MenuChoices(int menuId)
 		r[0] = T("Dot", "Ponto")
 		r[1] = T("Ring and dot", "Anel e ponto")
 		r[2] = T("Simple Lock-On reticle (.swf)", "Retícula do Simple Lock-On (.swf)")
-		r[3] = T("TDM reticle (.swf)", "Retícula do TDM (.swf)")
+		r[3] = T("Coeus-style reticle (.swf)", "Retícula estilo Coeus (.swf)")
 	elseIf menuId == 9
 		r = new string[6]
 		r[0] = T("White", "Branco")
@@ -252,9 +252,9 @@ EndEvent
 
 string Function ProfileName(int v)
 	if v == 2
-		return T("TDM (Unsheathed on)", "TDM (Unsheathed ligado)")
+		return T("FreeCam / Coeus (Unsheathed on)", "FreeCam / Coeus (Unsheathed ligado)")
 	endIf
-	return T("Normal (without TDM)", "Normal (sem TDM)")
+	return T("Normal (vanilla movement)", "Normal (movimento do jogo)")
 EndFunction
 
 Function AddButtonRow(string key, string label, string btn, string info)
@@ -293,7 +293,7 @@ Function PageGeneral()
 	AddEmptyOption()
 	AddToggleRow("Enabled", T("Enabled", "Ativado"), 1.0, T("Turns the whole mod on or off.", "Liga ou desliga o mod inteiro."))
 	AddMenuRow("Language", T("Menu language", "Idioma do menu"), 1, 0.0, T("Language of this menu. Page names update the next time you open the menu.", "Idioma deste menu. Os nomes das páginas mudam na próxima vez que abrir o menu."))
-	AddMenuRow("ProfileMode", T("Profile", "Perfil"), 7, 0.0, T("Normal: no directional movement (TDM off, or Coeus with EnableUnsheathed=0, so weapons-drawn movement is vanilla). TDM: Coeus directional movement is active with weapons drawn (EnableUnsheathed=1). Pick the one that matches your Coeus setting.", "Normal: sem movimento direcional (TDM desligado, ou Coeus com EnableUnsheathed=0, então com armas na mão o movimento é o do jogo). TDM: o movimento direcional do Coeus está ativo com armas na mão (EnableUnsheathed=1). Escolha o que corresponde à sua configuração do Coeus."))
+	AddMenuRow("ProfileMode", T("Profile", "Perfil"), 7, 0.0, T("Normal: no directional movement (Coeus off, or Coeus with EnableUnsheathed=0, so weapons-drawn movement is vanilla). FreeCam / Coeus: Coeus directional movement is active with weapons drawn (EnableUnsheathed=1). Pick the one that matches your Coeus setting.", "Normal: sem movimento direcional (Coeus desligado, ou Coeus com EnableUnsheathed=0, então com armas na mão o movimento é o do jogo). FreeCam / Coeus: o movimento direcional do Coeus está ativo com armas na mão (EnableUnsheathed=1). Escolha o que corresponde à sua configuração do Coeus."))
 	AddEmptyOption()
 	AddHeaderOption(T("Status", "Estado"))
 	AddEmptyOption()
@@ -347,7 +347,7 @@ Function PageBody()
 	AddEmptyOption()
 	int prof = SoftTargetNative.GetInt("ProfileMode")
 	if prof == 0
-		AddHeaderOption(T("Normal profile (without TDM)", "Perfil normal (sem TDM)"))
+		AddHeaderOption(T("Normal profile", "Perfil normal"))
 		AddEmptyOption()
 		AddToggleRow("ReturnToHeading", T("Return to previous heading", "Voltar ao rumo anterior"), 0.0, T("After the combat window ends, the body turns slowly back to where it was facing. Off by default. Does not return while you hold the walk keys.", "Depois que a janela de combate termina, o corpo volta devagar para onde estava virado. Desligado por padrão. Não volta enquanto segura as teclas de andar."))
 		AddSliderRow("ReturnSpeedDegPerSec", T("Return max speed", "Velocidade máxima do regresso"), 90.0, 1000.0, 10.0, 360.0, 1.0, 0, "{0} deg/s", T("Upper limit of the return speed, in degrees per second.", "Limite máximo da velocidade do regresso, em graus por segundo."))
@@ -359,13 +359,13 @@ EndFunction
 Function PageCamera()
 	int prof = SoftTargetNative.GetInt("ProfileMode")
 	if prof == 1
-		AddHeaderOption(T("TDM profile (directional movement)", "Perfil TDM (movimento direcional)"))
+		AddHeaderOption(T("FreeCam / Coeus profile (directional movement)", "Perfil FreeCam / Coeus (movimento direcional)"))
 		AddEmptyOption()
 		AddToggleRow("CoeusYield", T("Face the target while moving", "Encarar o alvo enquanto anda"), 0.0, T("Off (default): Coeus keeps control of the body while you walk. On: during the combat window (or with the lock-on on) Coeus lets go of the body: the character faces the enemy and walks relative to that facing (W = toward the enemy, S = backpedal, A/D = strafe). Works with either setting.", "Desligado (padrão): o Coeus mantém o controlo do corpo enquanto anda. Ligado: durante a janela de combate (ou com o lock-on ligado) o Coeus larga o corpo: o personagem encara o inimigo e anda relativo a isso (W = para o inimigo, S = recuar, A/D = lateral). Funciona com qualquer uma das opções."))
-		AddToggleRow("CameraHoldTdm", T("Keep the camera still when the body turns", "Câmera parada quando o corpo vira"), 1.0, T("When this mod turns the body toward an enemy, the camera stays where you put it and the mouse keeps moving only the camera (the TDM way). Off = the camera follows the turning body.", "Quando este mod vira o corpo para um inimigo, a câmera fica onde a pôs e o rato continua a mexer só a câmera (como no TDM). Desligado = a câmera acompanha o corpo que vira."))
+		AddToggleRow("CameraHoldTdm", T("Keep the camera still when the body turns", "Câmera parada quando o corpo vira"), 1.0, T("When this mod turns the body toward an enemy, the camera stays where you put it and the mouse keeps moving only the camera (free camera style). Off = the camera follows the turning body.", "Quando este mod vira o corpo para um inimigo, a câmera fica onde a pôs e o rato continua a mexer só a câmera (câmera livre). Desligado = a câmera acompanha o corpo que vira."))
 		AddSliderRow("AttackPulseMs", T("Turn while walking", "Virar enquanto anda"), 0.0, 1500.0, 50.0, 350.0, 0.001, 1, "{2} s", T("Only when 'Face the target while moving' is off: each attack turns the walking body toward the enemy for this long. 0 = never.", "Só quando 'Encarar o alvo enquanto anda' está desligado: cada ataque vira o corpo em movimento para o inimigo durante este tempo. 0 = nunca."))
 	else
-		AddHeaderOption(T("Normal profile (without TDM)", "Perfil normal (sem TDM)"))
+		AddHeaderOption(T("Normal profile", "Perfil normal"))
 		AddEmptyOption()
 		AddStatusRow(T("Camera options", "Opções da câmera"), T("see Lock-On page", "veja a página Lock-On"), T("The camera options for the lock-on are on the Lock-On page. Outside the lock-on the camera is never touched.", "As opções da câmera do lock-on estão na página Lock-On. Fora do lock-on a câmera nunca é tocada."))
 	endIf
@@ -392,7 +392,7 @@ Function PageLock()
 	AddSliderRow("LockLoseAngleDegrees", T("Out-of-view angle", "Ângulo de fora da vista"), 30.0, 170.0, 5.0, 75.0, 1.0, 0, "{0} deg", T("The target counts as out of view when its whole body is further than this from the center of the screen. Walls and rocks in between are not detected yet.", "O alvo conta como fora da vista quando o corpo inteiro está mais longe do que isto do centro do ecrã. Paredes e rochas pelo meio ainda não são detetadas."))
 	AddHeaderOption(T("Camera", "Câmera"))
 	AddEmptyOption()
-	AddToggleRow("LockCameraFollow", T("Camera follows the target", "Câmera acompanha o alvo"), 1.0, T("With the lock on, the camera turns to the target (in both profiles; in the TDM profile through the camera offset, like the target lock of True Directional Movement).", "Com o lock ligado, a câmera vira para o alvo (nos dois perfis; no perfil TDM pelo deslocamento da câmera, como o target lock do True Directional Movement)."))
+	AddToggleRow("LockCameraFollow", T("Camera follows the target", "Câmera acompanha o alvo"), 1.0, T("With the lock on, the camera turns to the target (in both profiles; in the FreeCam / Coeus profile through the camera offset).", "Com o lock ligado, a câmera vira para o alvo (nos dois perfis; no perfil FreeCam / Coeus pelo deslocamento da câmera)."))
 	AddToggleRow("LockCameraPitch", T("Camera also looks up/down", "Câmera também sobe/desce"), 1.0, T("The camera tilts up or down toward the target (dragons, high ground). Turn off if the camera behaves strangely.", "A câmera inclina para cima ou para baixo para o alvo (dragões, terreno alto). Desligue se a câmera se portar de forma estranha."))
 	AddSliderRow("LockCameraSmooth", T("Camera speed", "Velocidade da câmera"), 2.0, 20.0, 0.5, 8.0, 1.0, 0, "{1}", T("How fast the camera turns to the target. Higher is faster and less smooth.", "A velocidade com que a câmera vira para o alvo. Mais é mais rápido e menos suave."))
 	AddHeaderOption(T("Shot prediction (only with lock-on)", "Previsão do disparo (só com lock-on)"))
@@ -404,16 +404,33 @@ Function PageLock()
 	AddSliderRow("PredictMinDistance", T("Minimum distance", "Distância mínima"), 100.0, 2000.0, 50.0, 400.0, 1.0, 0, "{0}", T("Closer than this there is no prediction.", "Mais perto do que isto não há previsão."))
 EndFunction
 
+bool Function HasBit(int mask, int bit)
+	if bit == 1
+		return (mask % 2) == 1
+	endIf
+	return ((mask / 2) % 2) == 1
+EndFunction
+
+string Function FoundText(int mask, int bit)
+	if HasBit(mask, bit)
+		return T("found", "encontrado")
+	endIf
+	return T("not found", "não encontrado")
+EndFunction
+
 Function PageDot()
 	AddHeaderOption(T("On-screen indicator", "Indicador no ecrã"))
 	AddEmptyOption()
 	AddToggleRow("DotLock", T("Show on the locked target", "Mostrar no alvo do lock-on"), 1.0, T("Draws the indicator on the enemy you have locked.", "Desenha o indicador no inimigo que prendeu."))
 	AddToggleRow("DotSoftTarget", T("Show on the SoftTarget enemy", "Mostrar no inimigo do SoftTarget"), 0.0, T("Also draws the indicator on the enemy the body is turning toward while you fight.", "Desenha também o indicador no inimigo para onde o corpo está a virar enquanto luta."))
-	AddMenuRow("DotSkin", T("Appearance", "Aspeto"), 8, 1.0, T("Dot and Ring-and-dot are drawn by the plugin (no files). The Simple Lock-On reticle needs LockOnReticle.swf (or LockOnMenu.swf) in Data\\Interface. The TDM reticle needs TDM_Widgets.swf and TDM_Assets0.swf in Data\\Interface\\TrueDirectionalMovement (the retexture options of that mod change its look). If a file is missing the plain dot is used and the log says so.", "Ponto e Anel e ponto são desenhados pelo plugin (sem ficheiros). A retícula do Simple Lock-On precisa do LockOnReticle.swf (ou LockOnMenu.swf) em Data\\Interface. A retícula do TDM precisa do TDM_Widgets.swf e TDM_Assets0.swf em Data\\Interface\\TrueDirectionalMovement (as opções de retextura desse mod mudam o aspeto). Se faltar um ficheiro usa-se o ponto simples e o registo diz isso."))
+	int found = SoftTargetNative.Status(4)
+	AddStatusRow(T("Simple Lock-On reticle file", "Ficheiro da retícula do Simple Lock-On"), FoundText(found, 1), T("Looks for LockOnReticle.swf or LockOnMenu.swf in Data\\Interface.", "Procura LockOnReticle.swf ou LockOnMenu.swf em Data\\Interface."))
+	AddStatusRow(T("Coeus-style reticle files", "Ficheiros da retícula estilo Coeus"), FoundText(found, 2), T("Looks for TDM_Widgets.swf and TDM_Assets0.swf in Data\\Interface.", "Procura TDM_Widgets.swf e TDM_Assets0.swf em Data\\Interface."))
+	AddMenuRow("DotSkin", T("Appearance", "Aspeto"), 8, 1.0, T("Dot and Ring-and-dot are drawn by the plugin (no files). The Simple Lock-On reticle needs LockOnReticle.swf (or LockOnMenu.swf) in Data\\Interface. The Coeus-style reticle needs TDM_Widgets.swf and TDM_Assets0.swf in Data\\Interface (or Data\\Interface\\TrueDirectionalMovement); the retexture variants of that widget change its look. If a file is missing the plain dot is used and the log says so.", "Ponto e Anel e ponto são desenhados pelo plugin (sem ficheiros). A retícula do Simple Lock-On precisa do LockOnReticle.swf (ou LockOnMenu.swf) em Data\\Interface. A retícula estilo Coeus precisa do TDM_Widgets.swf e TDM_Assets0.swf em Data\\Interface (ou Data\\Interface\\TrueDirectionalMovement); as variantes de retextura desse widget mudam o aspeto. Se faltar um ficheiro usa-se o ponto simples e o registo diz isso."))
 	AddMenuRow("DotColor", T("Color (drawn skins)", "Cor (aspetos desenhados)"), 9, 0.0, T("Color of the dot and ring.", "Cor do ponto e do anel."))
 	AddSliderRow("DotSize", T("Size", "Tamanho"), 30.0, 400.0, 10.0, 100.0, 1.0, 0, "{0} %", T("Size of the indicator.", "Tamanho do indicador."))
 	AddSliderRow("DotOpacity", T("Opacity", "Opacidade"), 10.0, 100.0, 5.0, 100.0, 1.0, 0, "{0} %", T("How solid the indicator is.", "Quão opaco é o indicador."))
-	AddSliderRow("DotTdmType", T("TDM reticle type", "Tipo da retícula do TDM"), 0.0, 2.0, 1.0, 0.0, 1.0, 1, "{0}", T("Reticle type passed to the TDM widget (0, 1 or 2). Only used with the TDM reticle.", "Tipo de retícula passado ao widget do TDM (0, 1 ou 2). Só é usado com a retícula do TDM."))
+	AddSliderRow("DotTdmType", T("Coeus-style reticle type", "Tipo da retícula estilo Coeus"), 0.0, 2.0, 1.0, 0.0, 1.0, 1, "{0}", T("Reticle type passed to the reticle widget (0, 1 or 2). Only used with the Coeus-style reticle.", "Tipo de retícula passado ao widget da retícula (0, 1 ou 2). Só é usado com a retícula estilo Coeus."))
 EndFunction
 
 Function PageMagic()
@@ -510,6 +527,13 @@ Event OnOptionMenuAccept(int a_option, int a_index)
 	int i = FindRow(a_option)
 	if i < 0
 		return
+	endIf
+	if okey[i] == "DotSkin"
+		int have = SoftTargetNative.Status(4)
+		if (a_index == 2 && !HasBit(have, 1)) || (a_index == 3 && !HasBit(have, 2))
+			ShowMessage(T("Those files were not found in Data\\Interface, so this appearance stays unavailable. Keeping the previous one.", "Esses ficheiros não foram encontrados em Data\\Interface, por isso este aspeto fica indisponível. Mantém-se o anterior."), false)
+			return
+		endIf
 	endIf
 	SoftTargetNative.SetInt(okey[i], a_index)
 	if okey[i] == "Language"
