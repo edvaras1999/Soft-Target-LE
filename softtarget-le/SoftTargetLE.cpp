@@ -31,7 +31,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.12.4 (corpo preso ao alvo a andar, camera estavel no lock, previsao registada)"
+#define PLUGIN_VERSION_STR	"0.12.5 (vetor de movimento mais fiavel, peito como ponto de mira + ajuste manual, camera da magia, inclinacao so com arco/magia)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -132,6 +132,11 @@ namespace
 		// ---- v0.12.4
 		float	aimFilterMs;	// constante de tempo do filtro do ponto de mira (tira o balanco dos golpes do alvo)
 		float	camDeadZoneDeg;	// zona morta da camera do lock, graus
+		// ---- v0.12.5
+		float	aimAdjust;		// ajuste manual da altura do ponto de mira, unidades (Shift + roda do rato)
+		int		aimAdjustWheel;	// 1 = Shift + roda do rato ajusta a altura
+		int		aimUpKey;		// tecla alternativa: sobe o ponto de mira (201 = Page Up, 0 = nenhuma)
+		int		aimDownKey;		// tecla alternativa: desce o ponto de mira (209 = Page Down)
 	};
 	Config g_cfg;
 
@@ -213,6 +218,10 @@ namespace
 		{ "UseSpellDataSpeed",		'i', &g_cfg.useFormSpeed,		1.0f },
 		{ "AimFilterMs",			'f', &g_cfg.aimFilterMs,		350.0f },
 		{ "CameraDeadZoneDegrees",	'f', &g_cfg.camDeadZoneDeg,		1.5f },
+		{ "AimHeightAdjust",		'f', &g_cfg.aimAdjust,			0.0f },
+		{ "AimAdjustWheel",			'i', &g_cfg.aimAdjustWheel,		1.0f },
+		{ "AimAdjustUpKey",			'i', &g_cfg.aimUpKey,			201.0f },
+		{ "AimAdjustDownKey",		'i', &g_cfg.aimDownKey,			209.0f },
 	};
 	const int kNumOpts = sizeof(g_opts) / sizeof(g_opts[0]);
 
@@ -325,6 +334,8 @@ namespace
 		if(g_cfg.lockCameraSmooth < 1.0f)	g_cfg.lockCameraSmooth = 1.0f;
 		if(g_cfg.projectileSpeed < 500.0f)	g_cfg.projectileSpeed = 500.0f;
 		if(g_cfg.spellSpeed < 300.0f)		g_cfg.spellSpeed = 300.0f;
+		if(g_cfg.aimAdjust < -60.0f)		g_cfg.aimAdjust = -60.0f;
+		if(g_cfg.aimAdjust >  60.0f)		g_cfg.aimAdjust =  60.0f;
 		if(g_cfg.aimFilterMs < 0.0f)		g_cfg.aimFilterMs = 0.0f;
 		if(g_cfg.aimFilterMs > 1500.0f)		g_cfg.aimFilterMs = 1500.0f;
 		if(g_cfg.camDeadZoneDeg < 0.0f)		g_cfg.camDeadZoneDeg = 0.0f;
@@ -664,7 +675,7 @@ namespace
 	}
 
 	// Posicao de cada no do esqueleto do ator (o "corpo"): devolve quantos pontos escreveu em pts (x,y,z).
-	int CollectPoints(Actor * actor, float * pts, int maxPts)
+	int CollectPoints(Actor * actor, float * pts, int maxPts, float * chest = NULL, bool * hasChest = NULL)
 	{
 		NiNode * root = actor->GetNiNode();
 		if(!root) return 0;
@@ -680,6 +691,12 @@ namespace
 			const float ex = p.x - pos.x, ey = p.y - pos.y, ez = p.z - pos.z;
 			if(ex * ex + ey * ey + ez * ez < 2000.0f * 2000.0f)			// ignora nos perdidos na origem do mundo
 			{
+				// Osso do peito (humanos): ponto de mira estavel, nao muda com a arma nem com os bracos.
+				if(chest && hasChest && !*hasChest && nd->m_name && (strstr(nd->m_name, "Spn2") || strstr(nd->m_name, "Spine2")))
+				{
+					chest[0] = p.x; chest[1] = p.y; chest[2] = p.z;
+					*hasChest = true;
+				}
 				pts[n * 3] = p.x; pts[n * 3 + 1] = p.y; pts[n * 3 + 2] = p.z;
 				++n;
 			}
@@ -763,7 +780,9 @@ namespace
 
 			// Corpo: ponto mais perto (na horizontal) e centro do corpo.
 			float pts[3 * 128];
-			const int n = CollectPoints(actor, pts, 128);
+			bool hasChest = false;
+			float chestPos[3] = { 0.0f, 0.0f, 0.0f };
+			const int n = CollectPoints(actor, pts, 128, chestPos, &hasChest);
 			float nd = cdist, nx = pos.x, ny = pos.y, nz = pos.z;
 			float c[3] = { pos.x, pos.y, pos.z + g_cfg.aimHeight };
 			if(n >= 3)
@@ -781,6 +800,8 @@ namespace
 					if(qz > zmax) zmax = qz;
 				}
 				c[0] = sx / n; c[1] = sy / n; c[2] = zmin + 0.65f * (zmax - zmin);		// tronco, nao a media dos ossos
+				if(hasChest) { c[0] = chestPos[0]; c[1] = chestPos[1]; c[2] = chestPos[2]; }
+				c[2] += g_cfg.aimAdjust;
 			}
 
 			if(dbg && dbgLines < 8)
@@ -967,7 +988,9 @@ namespace
 	{
 		float pts[3 * 256];
 		const NiPoint3 pos = Engine::Position(actor);
-		int n = CollectPoints(actor, pts, 256);
+		bool hasChest = false;
+		float chestPos[3] = { 0.0f, 0.0f, 0.0f };
+		int n = CollectPoints(actor, pts, 256, chestPos, &hasChest);
 		if(n < 3)
 		{
 			// Sem esqueleto utilizavel: usa so os pes e a altura de mira.
@@ -987,6 +1010,8 @@ namespace
 		*outAngle = minA;
 		// Ponto de mira: centro horizontal do corpo, a 65% da altura (peito de um humano; para criaturas grandes, o tronco).
 		outCenter[0] = cx / n; outCenter[1] = cy / n; outCenter[2] = minZ + 0.65f * (maxZ - minZ);
+		if(hasChest) { outCenter[0] = chestPos[0]; outCenter[1] = chestPos[1]; outCenter[2] = chestPos[2]; }
+		outCenter[2] += g_cfg.aimAdjust;		// ajuste manual (Shift + roda do rato)
 		return true;
 	}
 
@@ -1374,18 +1399,38 @@ namespace
 				else if(score == bestScore) ++ties;
 			}
 		}
-		if(bestR < 0)
+		// So aceita um candidato claro: pelo menos uma direcao confirmada e sem empates; senao continua a recolher.
+		if(bestR < 0 || bestDirs < 1 || ties > 0)
 		{
-			// nada com a forma certa: recomeca a recolher (as contagens antigas ficam, mas as amostras duplicam-se)
-			if(g_mvMoveSamples > 600)
+			static int lastLogAt = 0;
+			if(g_mvMoveSamples - lastLogAt >= 500 || g_mvMoveSamples < lastLogAt)
 			{
-				_MESSAGE("input: no movement vector found in the player controls (%d moving / %d idle samples) - the input rotation stays off", g_mvMoveSamples, g_mvIdleSamples);
+				lastLogAt = g_mvMoveSamples;
+				if(bestR >= 0)
+				{
+					const MvCand & c = g_mvCand[bestR][bestI];
+					_MESSAGE("input: not sure yet (best: region %d offset 0x%X, directions %d of 4 [W%d S%d A%d D%d], equal candidates %d, %d moving / %d idle samples) - keep walking with W, A, S, D one at a time",
+							 bestR, bestI * 4, bestDirs, (int)c.dir[0], (int)c.dir[1], (int)c.dir[2], (int)c.dir[3], ties, g_mvMoveSamples, g_mvIdleSamples);
+				}
+			}
+			if(g_mvMoveSamples > 4000)
+			{
+				_MESSAGE("input: no clear movement vector found (%d moving / %d idle samples) - the input rotation stays off; set MoveVecRegion/MoveVecOffset in the ini if you know them", g_mvMoveSamples, g_mvIdleSamples);
 				g_mvMoveSamples = -1000000;		// desiste (nao volta a tentar nesta sessao de jogo)
 			}
 			return;
 		}
 		g_mvRegion = bestR; g_mvWord = bestI; g_mvFound = 1;
-		_MESSAGE("input: movement vector found: region %d, byte offset 0x%X (directions matched %d of 4, other equal candidates %d) - to skip the search put MoveVecRegion=%d and MoveVecOffset=%d in the ini",
+		g_cfg.mvRegion = bestR; g_cfg.mvOffset = bestI * 4;
+		{
+			// Guarda no ini (so estas duas chaves): nas proximas vezes nao e preciso procurar.
+			char b1[16], b2[16];
+			_snprintf_s(b1, sizeof(b1), _TRUNCATE, "%d", bestR);
+			_snprintf_s(b2, sizeof(b2), _TRUNCATE, "%d", bestI * 4);
+			WritePrivateProfileStringA("SoftTarget", "MoveVecRegion", b1, g_iniPath);
+			WritePrivateProfileStringA("SoftTarget", "MoveVecOffset", b2, g_iniPath);
+		}
+		_MESSAGE("input: movement vector found: region %d, byte offset 0x%X (directions matched %d of 4, other equal candidates %d) - saved to the ini (MoveVecRegion=%d, MoveVecOffset=%d)",
 				 bestR, bestI * 4, bestDirs, ties, bestR, bestI * 4);
 	}
 
@@ -1465,13 +1510,31 @@ namespace
 				if(g_cfg.cameraHoldTdm)
 				{
 					UInt8 * hcs = ThirdPersonStatePtr();
-					if(hcs && *(hcs + 0xB4) && !RangedHeld(player)) CameraHold(hcs, step);
+					if(hcs && *(hcs + 0xB4) && !BowAiming(player)) CameraHold(hcs, step);
 				}
 				rot.z = WrapPi(rot.z + step);
 			}
 			__except(EXCEPTION_EXECUTE_HANDLER) { }
 		}
 		return 0;
+	}
+
+	// Arco / besta a ser puxado (so ai o Coeus compensa a camera por si; com magia a compensacao e nossa).
+	bool BowAiming(PlayerCharacter * player)
+	{
+		return (g_holdLeft || g_holdRight) && BowEquipped(player);
+	}
+
+	// Ajuste manual da altura do ponto de mira (unidades); fica gravado no ini.
+	void AimAdjust(float delta)
+	{
+		g_cfg.aimAdjust += delta;
+		if(g_cfg.aimAdjust < -60.0f) g_cfg.aimAdjust = -60.0f;
+		if(g_cfg.aimAdjust >  60.0f) g_cfg.aimAdjust =  60.0f;
+		char buf[32];
+		_snprintf_s(buf, sizeof(buf), _TRUNCATE, "%.1f", g_cfg.aimAdjust);
+		WritePrivateProfileStringA("SoftTarget", "AimHeightAdjust", buf, g_iniPath);
+		_MESSAGE("aim point height adjust: %.1f", g_cfg.aimAdjust);
 	}
 
 	// Um passo do lock-on proprio (corre na thread de rotacao): valida o alvo, calcula o ponto de mira e a previsao.
@@ -2428,7 +2491,8 @@ namespace
 			const bool returnAllowed = g_cfg.returnToHeading && !coeusProfile;
 			const bool firstPerson = IsFirstPerson();
 			// Inclinar o corpo (bracos): pela opcao de mira vertical, ou com o lock-on proprio a prever um disparo / em primeira pessoa.
-			const bool useTilt = g_hasPitch && ((g_cfg.verticalMode & 1) || (g_lockOwn && (g_assist || firstPerson)));
+			const bool rangedNow = RangedHeld(player) || g_assist != 0;
+			const bool useTilt = g_hasPitch && (((g_cfg.verticalMode & 1) && rangedNow) || (g_lockOwn && (g_assist || firstPerson)));
 
 			if(g_active && !suppress && !sprintHold)
 			{
@@ -2446,8 +2510,8 @@ namespace
 				if(coeusProfile && g_cfg.cameraHoldTdm)
 				{
 					UInt8 * hcs = ThirdPersonStatePtr();
-					// Camera livre (0xB4 ligado), fora da mira com arco/magia (la o Coeus faz a sua propria compensacao): o deslocamento perde o que o corpo ganha.
-					if(hcs && *(hcs + 0xB4) && !RangedHeld(player))
+					// Camera livre (0xB4 ligado), fora da mira com arco (la o Coeus faz a sua propria compensacao; com magia a compensacao e nossa): o deslocamento perde o que o corpo ganha.
+					if(hcs && *(hcs + 0xB4) && !BowAiming(player))
 					{
 						CameraHold(hcs, stepYaw);
 						if(g_cfg.verbose && fabsf(stepYaw) > 0.001f) _MESSAGE("camhold: step %.3f free=%d offset=%.3f", stepYaw, (int)*(hcs + 0xB4), *(float *)(hcs + 0xAC));
@@ -2463,6 +2527,12 @@ namespace
 					if(up < -limitRad) up = -limitRad;
 					rot.x += StepToward(rot.x, -up * vSign, false, dt, maxRad, g_cfg.smoothing);	// positivo = olhar para baixo
 					if(!firstPerson) tiltUsed = true;		// em primeira pessoa rot.x e a propria vista: nao se repoe
+				}
+				else if(tiltUsed)
+				{
+					// Deixou de mirar com arco/magia: a inclinacao do corpo volta ao que era (nao fica presa a olhar para baixo).
+					rot.x += StepToward(rot.x, homePitch, false, dt, maxRad, g_cfg.smoothing);
+					if(fabsf(homePitch - rot.x) < 0.02f) { rot.x = homePitch; tiltUsed = false; }
 				}
 
 				// Lock-on proprio: a camera acompanha o alvo (SO no perfil normal; no FreeCam a camera e sempre do rato).
@@ -2761,10 +2831,27 @@ namespace
 					else if(MatchKey((UInt32)e->deviceType, (int)button->keyMask, g_cfg.lockSwitchKey)) LockSwitch();
 				}
 
+				// Shift + roda do rato: ajusta a altura do ponto de mira (em combate / com lock). Tenta tirar o evento ao zoom.
+				if(pressedNow && g_cfg.aimAdjustWheel && e->deviceType == kDeviceType_Mouse && g_shiftHeld && (g_active || g_lockOwn) && !MenuBlocksInput())
+				{
+					const int wc = (int)button->keyMask;
+					if(wc == 8 || wc == 9)
+					{
+						AimAdjust(wc == 8 ? 3.0f : -3.0f);
+						*(float *)&button->flags = 0.0f;
+						continue;
+					}
+				}
+
 				if(e->deviceType == kDeviceType_Keyboard)
 				{
 					const int code = (int)button->keyMask;
 					if(InList(g_shiftKeys, g_numShiftKeys, code)) g_shiftHeld = held ? 1 : 0;
+					if(pressedNow && (g_active || g_lockOwn) && !MenuBlocksInput())
+					{
+						if(g_cfg.aimUpKey && code == g_cfg.aimUpKey) AimAdjust(3.0f);
+						else if(g_cfg.aimDownKey && code == g_cfg.aimDownKey) AimAdjust(-3.0f);
+					}
 
 					// Tecla de reserva do lock-on (so quando nao ha LockOn.dll): cada toque liga/desliga.
 					if(g_cfg.lockOnKey && !g_sloIsLockOn && pressedNow && code == g_cfg.lockOnKey)
