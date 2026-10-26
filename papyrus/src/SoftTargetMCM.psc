@@ -19,7 +19,7 @@ int ocount
 int lang		; 0 = English, 1 = Portugues
 
 int Function GetVersion()
-	return 13
+	return 14
 EndFunction
 
 Function InitTables()
@@ -370,6 +370,14 @@ Function PageCamera()
 		AddEmptyOption()
 		AddStatusRow(T("Camera options", "Opções da câmera"), T("see Lock-On page", "veja a página Lock-On"), T("The camera options for the lock-on are on the Lock-On page. Outside the lock-on the camera is never touched.", "As opções da câmera do lock-on estão na página Lock-On. Fora do lock-on a câmera nunca é tocada."))
 	endIf
+	AddHeaderOption(T("Bow camera (both profiles)", "Câmera do arco (os dois perfis)"))
+	AddEmptyOption()
+	AddToggleRow("BowShoulder", T("Shoulder view with the bow", "Vista ao ombro com o arco"), 1.0, T("While you draw a bow or crossbow the camera moves to the shoulder (third-person shooter style) and goes back when you release.", "Enquanto puxa o arco ou a besta a câmera passa para o ombro (estilo jogo de tiro) e volta ao largar."))
+	AddToggleRow("BowShoulderRight", T("Right shoulder", "Ombro direito"), 1.0, T("On = right shoulder, off = left. The swap key changes it while you draw.", "Ligado = ombro direito, desligado = esquerdo. A tecla de trocar muda-o enquanto puxa."))
+	AddSliderRow("BowShoulderX", T("Shoulder: sideways", "Ombro: lateral"), 0.0, 120.0, 2.0, 40.0, 1.0, 0, "{0}", T("How far the camera moves sideways.", "Quanto a câmera vai para o lado."))
+	AddSliderRow("BowShoulderY", T("Shoulder: closer / farther", "Ombro: mais perto / mais longe"), -100.0, 100.0, 2.0, 0.0, 1.0, 0, "{0}", T("Added to the normal camera offset. Positive = camera forward (closer), negative = farther.", "Somado ao deslocamento normal da câmera. Positivo = câmera para a frente (mais perto), negativo = mais longe."))
+	AddSliderRow("BowShoulderZ", T("Shoulder: height", "Ombro: altura"), -60.0, 80.0, 2.0, 10.0, 1.0, 0, "{0}", T("Added to the normal camera height.", "Somado à altura normal da câmera."))
+	AddKeyRow("BowShoulderSwapKey", T("Swap shoulder key", "Tecla de trocar de ombro"), T("Pressed while the bow is drawn it swaps shoulder. Default E (also the Activate key).", "Carregada com o arco puxado troca de ombro. Padrão: E (também é a tecla de ativar)."))
 EndFunction
 
 Function PageLock()
