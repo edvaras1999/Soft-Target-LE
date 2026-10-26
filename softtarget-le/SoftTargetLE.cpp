@@ -31,7 +31,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.12.3 (FreeCam sem yield, rotacao do input, sprint mantem a mira, previsao com interceptacao, ajuste do ponto de mira)"
+#define PLUGIN_VERSION_STR	"0.12.4 (corpo preso ao alvo a andar, camera estavel no lock, previsao registada)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -129,6 +129,9 @@ namespace
 		float	spellSpeed;		// velocidade de reserva dos feiticos, unidades por segundo
 		float	speedScale;		// % aplicada a velocidade do projetil (ajuste fino da previsao)
 		int		useFormSpeed;	// 1 = le a velocidade do feitico nos dados do jogo
+		// ---- v0.12.4
+		float	aimFilterMs;	// constante de tempo do filtro do ponto de mira (tira o balanco dos golpes do alvo)
+		float	camDeadZoneDeg;	// zona morta da camera do lock, graus
 	};
 	Config g_cfg;
 
@@ -184,7 +187,7 @@ namespace
 		{ "LockCameraSmooth",		'f', &g_cfg.lockCameraSmooth,	8.0f },
 		{ "PredictEnabled",			'i', &g_cfg.predictEnabled,		1.0f },
 		{ "ProjectileSpeed",		'f', &g_cfg.projectileSpeed,	4500.0f },
-		{ "ProjectileGravity",		'f', &g_cfg.projectileGravity,	450.0f },
+		{ "ProjectileGravity",		'f', &g_cfg.projectileGravity,	470.0f },
 		{ "PredictStrength",		'f', &g_cfg.predictStrength,	100.0f },
 		{ "PredictMinDistance",		'f', &g_cfg.predictMinDist,		150.0f },
 		{ "LockCameraAxis",			'i', &g_cfg.lockCameraAxis,		1.0f },
@@ -208,6 +211,8 @@ namespace
 		{ "SpellProjectileSpeed",	'f', &g_cfg.spellSpeed,			2500.0f },
 		{ "ProjectileSpeedScale",	'f', &g_cfg.speedScale,			100.0f },
 		{ "UseSpellDataSpeed",		'i', &g_cfg.useFormSpeed,		1.0f },
+		{ "AimFilterMs",			'f', &g_cfg.aimFilterMs,		350.0f },
+		{ "CameraDeadZoneDegrees",	'f', &g_cfg.camDeadZoneDeg,		1.5f },
 	};
 	const int kNumOpts = sizeof(g_opts) / sizeof(g_opts[0]);
 
@@ -320,6 +325,10 @@ namespace
 		if(g_cfg.lockCameraSmooth < 1.0f)	g_cfg.lockCameraSmooth = 1.0f;
 		if(g_cfg.projectileSpeed < 500.0f)	g_cfg.projectileSpeed = 500.0f;
 		if(g_cfg.spellSpeed < 300.0f)		g_cfg.spellSpeed = 300.0f;
+		if(g_cfg.aimFilterMs < 0.0f)		g_cfg.aimFilterMs = 0.0f;
+		if(g_cfg.aimFilterMs > 1500.0f)		g_cfg.aimFilterMs = 1500.0f;
+		if(g_cfg.camDeadZoneDeg < 0.0f)		g_cfg.camDeadZoneDeg = 0.0f;
+		if(g_cfg.camDeadZoneDeg > 8.0f)		g_cfg.camDeadZoneDeg = 8.0f;
 		if(g_cfg.speedScale < 20.0f)		g_cfg.speedScale = 20.0f;
 		if(g_cfg.speedScale > 300.0f)		g_cfg.speedScale = 300.0f;
 		if(g_cfg.aimOffX < -20.0f)			g_cfg.aimOffX = -20.0f;
@@ -897,6 +906,7 @@ namespace
 	DWORD			g_assistUntil = 0;
 	DWORD			g_lockLostSince = 0, g_lastResolve = 0, g_lastNodes = 0, g_lockPrevTick = 0;
 	float			g_lockOff[3] = { 0.0f, 0.0f, 80.0f };	// centro do corpo menos a posicao do ator
+	UInt32			g_lockOffId = 0;						// alvo a que o filtro pertence
 	float			g_lockVel[3] = { 0.0f, 0.0f, 0.0f };	// velocidade estimada do alvo (unidades por segundo)
 	float			g_lockPrev[3] = { 0.0f, 0.0f, 0.0f };
 	int				g_camAxis = 1;				// eixo da camera que aponta para a frente (0..11): fixo, vem de LockCameraAxis (1 = coluna Y)
@@ -1425,6 +1435,45 @@ namespace
 		return 0;
 	}
 
+
+	// ------------------------------------------------------------------ corpo preso ao alvo enquanto anda (perfil FreeCam / Coeus)
+	// O Coeus roda o corpo para a direcao das teclas a cada frame; com a rotacao do input ativa o corpo tem de ficar no alvo.
+	// Esta thread repoe o corpo no alvo logo (sem limite de velocidade) e, com camera livre, compensa o deslocamento da camera
+	// para ela nao mexer.
+	volatile LONG	g_fastHold = 0;
+	volatile DWORD	g_fastHoldTick = 0;
+	long			g_holdTicks = 0, g_holdFixes = 0;
+
+	DWORD WINAPI HoldThread(LPVOID)
+	{
+		for(;;)
+		{
+			Sleep(1);
+			if(!g_fastHold || GetTickCount() - g_fastHoldTick > 120) continue;
+			__try
+			{
+				PlayerCharacter * player = Engine::Player();
+				if(!player) continue;
+				NiPoint3 & rot = Engine::Rotation(player);
+				const float diff = WrapPi(g_targetYaw - rot.z);
+				++g_holdTicks;
+				if(fabsf(diff) < 0.002f) continue;
+				++g_holdFixes;
+				float step = diff;
+				if(step >  0.7f) step =  0.7f;
+				if(step < -0.7f) step = -0.7f;
+				if(g_cfg.cameraHoldTdm)
+				{
+					UInt8 * hcs = ThirdPersonStatePtr();
+					if(hcs && *(hcs + 0xB4) && !RangedHeld(player)) CameraHold(hcs, step);
+				}
+				rot.z = WrapPi(rot.z + step);
+			}
+			__except(EXCEPTION_EXECUTE_HANDLER) { }
+		}
+		return 0;
+	}
+
 	// Um passo do lock-on proprio (corre na thread de rotacao): valida o alvo, calcula o ponto de mira e a previsao.
 	void LockTick(PlayerCharacter * player, DWORD now)
 	{
@@ -1470,7 +1519,20 @@ namespace
 				float ang = kPi, c[3];
 				if(EvalBody(a, o, d, &ang, c))
 				{
-					g_lockOff[0] = c[0] - pos.x; g_lockOff[1] = c[1] - pos.y; g_lockOff[2] = c[2] - pos.z;
+					// Filtro: braços e arma do alvo mexem a cada golpe; a camera nao deve ir atras disso.
+					const float nx = c[0] - pos.x, ny = c[1] - pos.y, nz = c[2] - pos.z;
+					if(g_lockOffId != a->formID || g_cfg.aimFilterMs < 1.0f)
+					{
+						g_lockOff[0] = nx; g_lockOff[1] = ny; g_lockOff[2] = nz;
+						g_lockOffId = a->formID;
+					}
+					else
+					{
+						const float al = 1.0f - expf(-60.0f / g_cfg.aimFilterMs);
+						g_lockOff[0] += (nx - g_lockOff[0]) * al;
+						g_lockOff[1] += (ny - g_lockOff[1]) * al;
+						g_lockOff[2] += (nz - g_lockOff[2]) * al;
+					}
 				}
 				const bool visible = ang <= g_cfg.lockLoseAngleDeg * kPi / 180.0f;
 				if(visible) g_lockLostSince = 0;
@@ -1530,8 +1592,15 @@ namespace
 				}
 				ax = px; ay = py;
 				az = pz + (bow ? 0.5f * g_cfg.projectileGravity * t * t : 0.0f);
-				if(g_cfg.verbose)
-					_MESSAGE("predict: dist %.0f speed %.0f t %.2fs lead (%.0f, %.0f, %.0f) %s", dist, speed, t, px - (pos.x + g_lockOff[0]), py - (pos.y + g_lockOff[1]), pz - (pos.z + g_lockOff[2]), bow ? "bow" : "spell");
+				static DWORD lastPredLog = 0;
+				if(now - lastPredLog > 400)
+				{
+					lastPredLog = now;
+					_MESSAGE("predict: %s dist %.0f speed %.0f flight %.2fs | target speed %.0f u/s | lead (%.0f, %.0f, %.0f) drop +%.0f",
+							 bow ? "bow" : "spell", dist, speed, t, sqrtf(g_lockVel[0] * g_lockVel[0] + g_lockVel[1] * g_lockVel[1] + g_lockVel[2] * g_lockVel[2]),
+							 px - (pos.x + g_lockOff[0]), py - (pos.y + g_lockOff[1]), pz - (pos.z + g_lockOff[2]),
+							 bow ? 0.5f * g_cfg.projectileGravity * t * t : 0.0f);
+				}
 			}
 		}
 		g_aimX = ax; g_aimY = ay; g_aimZ = az;
@@ -2347,6 +2416,10 @@ namespace
 			}
 			g_mvWant = (remapOn && g_active && !suppress && g_moveHeld) ? 1 : 0;
 			g_mvWantTick = now;
+			// Com a rotacao do input a andar, quem prende o corpo ao alvo e a HoldThread (rapida); esta thread so trata do resto.
+			const bool fastHold = (g_mvWant != 0) && !sprintHold;
+			g_fastHold = fastHold ? 1 : 0;
+			g_fastHoldTick = now;
 
 			NiPoint3 & rot = Engine::Rotation(player);
 			const float maxRad = g_cfg.turnSpeedDeg * kPi / 180.0f;
@@ -2369,7 +2442,7 @@ namespace
 				}
 				else if(phase == 2) phase = 1;
 
-				const float stepYaw = StepToward(rot.z, g_targetYaw, true, dt, maxRad, g_cfg.smoothing);
+				const float stepYaw = fastHold ? 0.0f : StepToward(rot.z, g_targetYaw, true, dt, maxRad, g_cfg.smoothing);
 				if(coeusProfile && g_cfg.cameraHoldTdm)
 				{
 					UInt8 * hcs = ThirdPersonStatePtr();
@@ -2412,6 +2485,13 @@ namespace
 									wantYaw = WrapPi(cy + WrapPi(atan2f(g_aimX - o2[0], g_aimY - o2[1]) - atan2f(d2[0], d2[1])));
 							}
 							wantYaw = WrapPi(wantYaw - g_cfg.aimOffX * kPi / 180.0f);		// alvo a direita do centro = camera um pouco mais a esquerda
+							{
+								// Zona morta: erros pequenos nao mexem a camera (os golpes do alvo nao a abanam); fora dela segue sem salto.
+								const float dz = g_cfg.camDeadZoneDeg * kPi / 180.0f;
+								const float dl = WrapPi(wantYaw - cy);
+								if(fabsf(dl) <= dz) wantYaw = cy;
+								else wantYaw = WrapPi(cy + dl - (dl > 0.0f ? dz : -dz));
+							}
 							cy = WrapPi(cy + StepToward(cy, wantYaw, true, dt, maxRad, g_cfg.lockCameraSmooth));
 							*(float *)(cs + 0x5C) = cy;
 							*(float *)(cs + 0x60) = cy;
@@ -2432,6 +2512,12 @@ namespace
 							if(want >  1.1f) want =  1.1f;
 							if(want < -1.1f) want = -1.1f;
 							float cp = *(float *)(cs + 0x54);
+							{
+								const float dzp = g_cfg.camDeadZoneDeg * kPi / 180.0f;
+								const float dp = want - cp;
+								if(fabsf(dp) <= dzp) want = cp;
+								else want = cp + dp - (dp > 0.0f ? dzp : -dzp);
+							}
 							cp += StepToward(cp, want, false, dt, maxRad, g_cfg.lockCameraSmooth);
 							*(float *)(cs + 0x54) = cp;
 							*(float *)(cs + 0x58) = cp;
@@ -2583,6 +2669,7 @@ namespace
 			_MESSAGE("probe-move: coeusDirectional=%d yieldRequested=%d ownLock=%d keys F%d B%d L%d R%d shift=%d | body-to-target %.1f deg | profile=%d CoeusYield=%d",
 					 cdir, (int)g_yieldNow, (int)g_lockOwn, (int)g_kFwd, (int)g_kBack, (int)g_kLeft, (int)g_kRight, (int)g_shiftHeld,
 					 WrapPi(g_targetYaw - rot.z) * 180.0f / kPi, g_cfg.profileMode, g_cfg.coeusYield);
+			_MESSAGE("probe-hold: fast=%d ticks %ld, body had to be put back on the target %ld times (high = Coeus keeps turning it)", (int)g_fastHold, g_holdTicks, g_holdFixes);
 			_MESSAGE("probe-input: remap=%d found=%d region %d offset 0x%X | writes %ld, game left our value %ld of %ld checks (low = the game/Coeus rewrite the vector)",
 					 g_cfg.moveRemap, (int)g_mvFound, g_mvRegion, g_mvWord * 4, g_mvWrites, g_mvKept, g_mvSeen);
 		}
@@ -2757,6 +2844,7 @@ namespace
 				dispatcher->AddEventSink(&g_sink);
 				CreateThread(NULL, 0, TurnThread, NULL, 0, NULL);
 				CreateThread(NULL, 0, MvThread, NULL, 0, NULL);
+				CreateThread(NULL, 0, HoldThread, NULL, 0, NULL);
 				_MESSAGE("input receiver registered, turn thread started");
 				break;
 			}
