@@ -26,3 +26,5 @@ Function SaveProfile() global native
 
 ; Loads the user's profile over the current options. Returns 1 if a profile existed, 0 if not.
 int Function LoadProfile() global native
+
+Function LearnMovement() global native
