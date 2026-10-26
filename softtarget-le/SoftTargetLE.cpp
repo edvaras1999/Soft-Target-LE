@@ -31,7 +31,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.12.5 (vetor de movimento mais fiavel, peito como ponto de mira + ajuste manual, camera da magia, inclinacao so com arco/magia)"
+#define PLUGIN_VERSION_STR	"0.13.0 (camera ao ombro com o arco nos dois perfis, tecla para trocar de ombro; correcao de compilacao)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -137,6 +137,13 @@ namespace
 		int		aimAdjustWheel;	// 1 = Shift + roda do rato ajusta a altura
 		int		aimUpKey;		// tecla alternativa: sobe o ponto de mira (201 = Page Up, 0 = nenhuma)
 		int		aimDownKey;		// tecla alternativa: desce o ponto de mira (209 = Page Down)
+		// ---- v0.13.0: camera ao ombro com o arco
+		int		bowShoulder;	// 1 = ao puxar o arco a camera passa para o ombro (nos dois perfis)
+		int		bowRight;		// 1 = ombro direito, 0 = esquerdo
+		float	bowShX;			// desvio lateral da camera, unidades
+		float	bowShY;			// aproximacao (+) ou afastamento (-) da camera, somado ao valor normal
+		float	bowShZ;			// altura da camera, somada ao valor normal
+		int		bowSwapKey;		// tecla que troca de ombro enquanto se puxa o arco (18 = E)
 	};
 	Config g_cfg;
 
@@ -222,6 +229,12 @@ namespace
 		{ "AimAdjustWheel",			'i', &g_cfg.aimAdjustWheel,		1.0f },
 		{ "AimAdjustUpKey",			'i', &g_cfg.aimUpKey,			201.0f },
 		{ "AimAdjustDownKey",		'i', &g_cfg.aimDownKey,			209.0f },
+		{ "BowShoulder",			'i', &g_cfg.bowShoulder,		1.0f },
+		{ "BowShoulderRight",		'i', &g_cfg.bowRight,			1.0f },
+		{ "BowShoulderX",			'f', &g_cfg.bowShX,				40.0f },
+		{ "BowShoulderY",			'f', &g_cfg.bowShY,				0.0f },
+		{ "BowShoulderZ",			'f', &g_cfg.bowShZ,				10.0f },
+		{ "BowShoulderSwapKey",		'i', &g_cfg.bowSwapKey,			18.0f },
 	};
 	const int kNumOpts = sizeof(g_opts) / sizeof(g_opts[0]);
 
@@ -334,6 +347,12 @@ namespace
 		if(g_cfg.lockCameraSmooth < 1.0f)	g_cfg.lockCameraSmooth = 1.0f;
 		if(g_cfg.projectileSpeed < 500.0f)	g_cfg.projectileSpeed = 500.0f;
 		if(g_cfg.spellSpeed < 300.0f)		g_cfg.spellSpeed = 300.0f;
+		if(g_cfg.bowShX < 0.0f)				g_cfg.bowShX = 0.0f;
+		if(g_cfg.bowShX > 120.0f)			g_cfg.bowShX = 120.0f;
+		if(g_cfg.bowShY < -100.0f)			g_cfg.bowShY = -100.0f;
+		if(g_cfg.bowShY >  100.0f)			g_cfg.bowShY =  100.0f;
+		if(g_cfg.bowShZ < -60.0f)			g_cfg.bowShZ = -60.0f;
+		if(g_cfg.bowShZ >  80.0f)			g_cfg.bowShZ =  80.0f;
 		if(g_cfg.aimAdjust < -60.0f)		g_cfg.aimAdjust = -60.0f;
 		if(g_cfg.aimAdjust >  60.0f)		g_cfg.aimAdjust =  60.0f;
 		if(g_cfg.aimFilterMs < 0.0f)		g_cfg.aimFilterMs = 0.0f;
@@ -1481,6 +1500,8 @@ namespace
 	}
 
 
+	bool BowAiming(PlayerCharacter * player);
+
 	// ------------------------------------------------------------------ corpo preso ao alvo enquanto anda (perfil FreeCam / Coeus)
 	// O Coeus roda o corpo para a direcao das teclas a cada frame; com a rotacao do input ativa o corpo tem de ficar no alvo.
 	// Esta thread repoe o corpo no alvo logo (sem limite de velocidade) e, com camera livre, compensa o deslocamento da camera
@@ -1535,6 +1556,66 @@ namespace
 		_snprintf_s(buf, sizeof(buf), _TRUNCATE, "%.1f", g_cfg.aimAdjust);
 		WritePrivateProfileStringA("SoftTarget", "AimHeightAdjust", buf, g_iniPath);
 		_MESSAGE("aim point height adjust: %.1f", g_cfg.aimAdjust);
+	}
+
+	// ------------------------------------------------------------------ camera ao ombro com o arco
+	// A camera de terceira pessoa tem o deslocamento "por cima do ombro" (x lateral, y a frente, z altura) em 0x3C..0x44 e o valor
+	// de destino em 0x48..0x50 (confirmado nos logs: os dois grupos sao iguais). Enquanto se puxa o arco levamo-lo para o ombro
+	// escolhido, com transicao suave, e ao largar repomos os valores de antes.
+	bool			g_shOn = false;
+	bool			g_shTgt = false;			// o grupo 0x48 e uma copia do 0x3C (so entao o escrevemos)
+	float			g_shOrig[3] = { 0.0f, 0.0f, 0.0f };
+	float			g_shCur[3] = { 0.0f, 0.0f, 0.0f };
+	DWORD			g_shHold = 0;
+
+	void ShoulderTick(PlayerCharacter * player, float dt, DWORD now)
+	{
+		UInt8 * cs = ThirdPersonStatePtr();
+		if(!cs) { g_shOn = false; return; }
+		const bool want = g_cfg.bowShoulder && !IsFirstPerson() && BowAiming(player);
+		if(want) g_shHold = now + 250;
+		const bool aiming = want || (g_shOn && (LONG)(g_shHold - now) > 0);
+		if(!aiming && !g_shOn) return;
+
+		float * cur = (float *)(cs + 0x3C);
+		float * tgt = (float *)(cs + 0x48);
+		const float a = 1.0f - expf(-dt * 14.0f);
+
+		if(aiming)
+		{
+			if(!g_shOn)
+			{
+				g_shOn = true;
+				for(int k = 0; k < 3; ++k) { g_shOrig[k] = cur[k]; g_shCur[k] = cur[k]; }
+				g_shTgt = fabsf(tgt[0] - cur[0]) < 0.01f && fabsf(tgt[1] - cur[1]) < 0.01f && fabsf(tgt[2] - cur[2]) < 0.01f;
+				_MESSAGE("bow camera: shoulder view ON (%s shoulder), normal offset (%.1f, %.1f, %.1f), target copy=%d, free-rotation=%d",
+						 g_cfg.bowRight ? "right" : "left", cur[0], cur[1], cur[2], g_shTgt ? 1 : 0, (int)*(cs + 0xB4));
+			}
+			const float w[3] = { (g_cfg.bowRight ? 1.0f : -1.0f) * g_cfg.bowShX, g_shOrig[1] + g_cfg.bowShY, g_shOrig[2] + g_cfg.bowShZ };
+			for(int k = 0; k < 3; ++k)
+			{
+				g_shCur[k] += (w[k] - g_shCur[k]) * a;
+				cur[k] = g_shCur[k];
+				if(g_shTgt) tgt[k] = g_shCur[k];
+			}
+		}
+		else
+		{
+			float err = 0.0f;
+			for(int k = 0; k < 3; ++k)
+			{
+				g_shCur[k] += (g_shOrig[k] - g_shCur[k]) * a;
+				cur[k] = g_shCur[k];
+				if(g_shTgt) tgt[k] = g_shCur[k];
+				err += fabsf(g_shOrig[k] - g_shCur[k]);
+			}
+			if(err < 0.3f)
+			{
+				for(int k = 0; k < 3; ++k) { cur[k] = g_shOrig[k]; if(g_shTgt) tgt[k] = g_shOrig[k]; }
+				g_shOn = false;
+				_MESSAGE("bow camera: shoulder view OFF");
+			}
+		}
 	}
 
 	// Um passo do lock-on proprio (corre na thread de rotacao): valida o alvo, calcula o ponto de mira e a previsao.
@@ -2479,6 +2560,10 @@ namespace
 			}
 			g_mvWant = (remapOn && g_active && !suppress && g_moveHeld) ? 1 : 0;
 			g_mvWantTick = now;
+			// Camera ao ombro com o arco (os dois perfis).
+			__try { ShoulderTick(player, dt, now); }
+			__except(EXCEPTION_EXECUTE_HANDLER) { g_shOn = false; }
+
 			// Com a rotacao do input a andar, quem prende o corpo ao alvo e a HoldThread (rapida); esta thread so trata do resto.
 			const bool fastHold = (g_mvWant != 0) && !sprintHold;
 			g_fastHold = fastHold ? 1 : 0;
@@ -2847,6 +2932,12 @@ namespace
 				{
 					const int code = (int)button->keyMask;
 					if(InList(g_shiftKeys, g_numShiftKeys, code)) g_shiftHeld = held ? 1 : 0;
+					if(pressedNow && g_shOn && g_cfg.bowSwapKey && code == g_cfg.bowSwapKey)
+					{
+						g_cfg.bowRight = g_cfg.bowRight ? 0 : 1;
+						WritePrivateProfileStringA("SoftTarget", "BowShoulderRight", g_cfg.bowRight ? "1" : "0", g_iniPath);
+						_MESSAGE("bow camera: %s shoulder", g_cfg.bowRight ? "right" : "left");
+					}
 					if(pressedNow && (g_active || g_lockOwn) && !MenuBlocksInput())
 					{
 						if(g_cfg.aimUpKey && code == g_cfg.aimUpKey) AimAdjust(3.0f);
