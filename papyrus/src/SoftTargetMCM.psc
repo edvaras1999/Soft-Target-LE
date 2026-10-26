@@ -19,7 +19,7 @@ int ocount
 int lang		; 0 = English, 1 = Portugues
 
 int Function GetVersion()
-	return 12
+	return 13
 EndFunction
 
 Function InitTables()
@@ -400,6 +400,10 @@ Function PageLock()
 	AddSliderRow("LockCameraSmooth", T("Camera speed", "Velocidade da câmera"), 2.0, 20.0, 0.5, 8.0, 1.0, 0, "{1}", T("How fast the camera turns to the target. Higher is faster and less smooth.", "A velocidade com que a câmera vira para o alvo. Mais é mais rápido e menos suave."))
 	AddSliderRow("AimFilterMs", T("Camera stability", "Estabilidade da câmera"), 0.0, 1000.0, 50.0, 350.0, 0.001, 1, "{2} s", T("Averages the aim point over this time so the target's weapon swings and arm movements do not shake the camera. 0 = off. Higher is steadier but slower to follow.", "Faz a média do ponto de mira durante este tempo, para os golpes e movimentos de braço do alvo não abanarem a câmera. 0 = desligado. Mais é mais estável mas segue mais devagar."))
 	AddSliderRow("CameraDeadZoneDegrees", T("Camera dead zone", "Zona morta da câmera"), 0.0, 8.0, 0.5, 1.5, 1.0, 0, "{1} deg", T("The camera ignores aiming errors smaller than this. 0 = off.", "A câmera ignora erros de mira menores do que isto. 0 = desligado."))
+	AddHeaderOption(T("Aim point height", "Altura do ponto de mira"))
+	AddEmptyOption()
+	AddSliderRow("AimHeightAdjust", T("Height adjust", "Ajuste de altura"), -60.0, 60.0, 1.0, 0.0, 1.0, 0, "{0}", T("Humans are aimed at the chest, other creatures at the middle of the body. This moves the point up (+) or down (-), in game units. In combat you can also change it with Shift + mouse wheel (or Page Up / Page Down).", "Os humanos são mirados no peito, as outras criaturas no meio do corpo. Isto sobe (+) ou desce (-) o ponto, em unidades do jogo. Em combate também pode mudar com Shift + roda do rato (ou Page Up / Page Down)."))
+	AddToggleRow("AimAdjustWheel", T("Shift + wheel adjusts it", "Shift + roda ajusta"), 1.0, T("In combat, Shift + mouse wheel changes the aim point height instead of zooming. Turn off if the wheel still zooms; Page Up / Page Down keep working.", "Em combate, Shift + roda do rato muda a altura do ponto de mira em vez de dar zoom. Desligue se a roda ainda der zoom; Page Up / Page Down continuam a funcionar."))
 	AddHeaderOption(T("Shot prediction (only with lock-on)", "Previsão do disparo (só com lock-on)"))
 	AddEmptyOption()
 	AddToggleRow("PredictEnabled", T("Predict the shot", "Prever o disparo"), 1.0, T("While you draw a bow / crossbow or hold a spell button with the lock on, the aim leads a moving target. Without lock-on the shot is the normal one.", "Enquanto puxa o arco / besta ou segura o botão de uma magia com o lock ligado, a mira antecipa o alvo em movimento. Sem lock-on o disparo é o normal."))
