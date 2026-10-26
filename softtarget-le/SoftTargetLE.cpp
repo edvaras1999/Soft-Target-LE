@@ -31,7 +31,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.13.0 (camera ao ombro com o arco nos dois perfis, tecla para trocar de ombro; correcao de compilacao)"
+#define PLUGIN_VERSION_STR	"0.13.1 (aprendizagem do movimento com Shift+F10, lock com arco no FreeCam, ini FreeCam por omissao, escolha automatica so em combate)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -144,6 +144,10 @@ namespace
 		float	bowShY;			// aproximacao (+) ou afastamento (-) da camera, somado ao valor normal
 		float	bowShZ;			// altura da camera, somada ao valor normal
 		int		bowSwapKey;		// tecla que troca de ombro enquanto se puxa o arco (18 = E)
+		// ---- v0.13.1
+		int		bowLockCamera;	// 1 = (perfil FreeCam) com o lock e o arco puxado a camera centra o alvo
+		int		lockAutoCombatOnly;	// 1 = a escolha automatica so apanha inimigos em combate
+		int		mvLearnKey;		// tecla (com Shift) que inicia a aprendizagem do vetor de movimento (68 = F10)
 	};
 	Config g_cfg;
 
@@ -157,14 +161,14 @@ namespace
 		{ "Probe",					'i', &g_cfg.probe,				0.0f },
 		{ "RequireCombat",			'i', &g_cfg.requireCombat,		1.0f },
 		{ "UseHostileList",			'i', &g_cfg.useHostileList,		1.0f },
-		{ "Shape",					'i', &g_cfg.shape,				0.0f },
+		{ "Shape",					'i', &g_cfg.shape,				1.0f },
 		{ "Range",					'f', &g_cfg.range,				450.0f },
 		{ "ConeDegrees",			'f', &g_cfg.coneDeg,			140.0f },
 		{ "MaxHeightDifference",	'f', &g_cfg.maxHeightDiff,		600.0f },
-		{ "SwitchMarginPercent",	'f', &g_cfg.switchMargin,		0.0f },
+		{ "SwitchMarginPercent",	'f', &g_cfg.switchMargin,		20.0f },
 		{ "TurnSpeedDegPerSec",		'f', &g_cfg.turnSpeedDeg,		900.0f },
-		{ "Smoothing",				'f', &g_cfg.smoothing,			0.0f },
-		{ "UpdateMilliseconds",		'i', &g_cfg.updateMs,			8.0f },
+		{ "Smoothing",				'f', &g_cfg.smoothing,			15.0f },
+		{ "UpdateMilliseconds",		'i', &g_cfg.updateMs,			1.0f },
 		{ "TapAssist",				'i', &g_cfg.tapAssist,			1.0f },
 		{ "HoldFaceButton",			'i', &g_cfg.holdMode,			3.0f },
 		{ "RetargetMilliseconds",	'i', &g_cfg.retargetMs,			80.0f },
@@ -182,21 +186,21 @@ namespace
 		{ "VerticalInvert",			'i', &g_cfg.verticalInvert,		0.0f },
 		{ "VerticalLimitDegrees",	'f', &g_cfg.verticalLimitDeg,	45.0f },
 		{ "Language",				'i', &g_cfg.language,			0.0f },
-		{ "ProfileMode",			'i', &g_cfg.profileMode,		0.0f },
+		{ "ProfileMode",			'i', &g_cfg.profileMode,		1.0f },
 		{ "LockOnSwitchKey",		'i', &g_cfg.lockOnSwitchKey,	0.0f },
 		{ "AllowReanimated",		'i', &g_cfg.allowReanimated,	1.0f },
 		{ "LockEnabled",			'i', &g_cfg.lockEnabled,		1.0f },
 		{ "LockKey",				'i', &g_cfg.lockKey,			33.0f },
 		{ "LockSwitchKey",			'i', &g_cfg.lockSwitchKey,		258.0f },
-		{ "LockRange",				'f', &g_cfg.lockRange,			4000.0f },
+		{ "LockRange",				'f', &g_cfg.lockRange,			2000.0f },
 		{ "LockAcquireDegrees",		'f', &g_cfg.lockAcquireDeg,		30.0f },
 		{ "LockHostileOnly",		'i', &g_cfg.lockHostileOnly,	1.0f },
 		{ "LockLoseSightMs",		'i', &g_cfg.lockLoseSightMs,	1500.0f },
 		{ "LockLoseAngleDegrees",	'f', &g_cfg.lockLoseAngleDeg,	75.0f },
 		{ "LockAutoNext",			'i', &g_cfg.lockAutoNext,		1.0f },
-		{ "LockCameraFollow",		'i', &g_cfg.lockCameraFollow,	1.0f },
+		{ "LockCameraFollow",		'i', &g_cfg.lockCameraFollow,	0.0f },
 		{ "LockCameraPitch",		'i', &g_cfg.lockCameraPitch,	1.0f },
-		{ "LockCameraSmooth",		'f', &g_cfg.lockCameraSmooth,	8.0f },
+		{ "LockCameraSmooth",		'f', &g_cfg.lockCameraSmooth,	5.0f },
 		{ "PredictEnabled",			'i', &g_cfg.predictEnabled,		1.0f },
 		{ "ProjectileSpeed",		'f', &g_cfg.projectileSpeed,	4500.0f },
 		{ "ProjectileGravity",		'f', &g_cfg.projectileGravity,	470.0f },
@@ -208,12 +212,12 @@ namespace
 		{ "CameraHoldTdm",			'i', &g_cfg.cameraHoldTdm,		1.0f },
 		{ "CreateHandles",			'i', &g_cfg.createHandles,		1.0f },
 		{ "DotLock",				'i', &g_cfg.dotLock,			1.0f },
-		{ "DotSoftTarget",			'i', &g_cfg.dotSoft,			0.0f },
-		{ "DotSkin",				'i', &g_cfg.dotSkin,			1.0f },
+		{ "DotSoftTarget",			'i', &g_cfg.dotSoft,			1.0f },
+		{ "DotSkin",				'i', &g_cfg.dotSkin,			3.0f },
 		{ "DotSize",				'f', &g_cfg.dotSize,			100.0f },
 		{ "DotColor",				'i', &g_cfg.dotColor,			0.0f },
 		{ "DotOpacity",				'f', &g_cfg.dotOpacity,			100.0f },
-		{ "DotTdmType",				'i', &g_cfg.dotTdmType,			0.0f },
+		{ "DotTdmType",				'i', &g_cfg.dotTdmType,			1.0f },
 		{ "MoveRemap",				'i', &g_cfg.moveRemap,			1.0f },
 		{ "SprintKeepsAim",			'i', &g_cfg.sprintKeepsAim,		1.0f },
 		{ "MoveVecRegion",			'i', &g_cfg.mvRegion,			-1.0f },
@@ -223,8 +227,8 @@ namespace
 		{ "SpellProjectileSpeed",	'f', &g_cfg.spellSpeed,			2500.0f },
 		{ "ProjectileSpeedScale",	'f', &g_cfg.speedScale,			100.0f },
 		{ "UseSpellDataSpeed",		'i', &g_cfg.useFormSpeed,		1.0f },
-		{ "AimFilterMs",			'f', &g_cfg.aimFilterMs,		350.0f },
-		{ "CameraDeadZoneDegrees",	'f', &g_cfg.camDeadZoneDeg,		1.5f },
+		{ "AimFilterMs",			'f', &g_cfg.aimFilterMs,		600.0f },
+		{ "CameraDeadZoneDegrees",	'f', &g_cfg.camDeadZoneDeg,		3.5f },
 		{ "AimHeightAdjust",		'f', &g_cfg.aimAdjust,			0.0f },
 		{ "AimAdjustWheel",			'i', &g_cfg.aimAdjustWheel,		1.0f },
 		{ "AimAdjustUpKey",			'i', &g_cfg.aimUpKey,			201.0f },
@@ -235,6 +239,9 @@ namespace
 		{ "BowShoulderY",			'f', &g_cfg.bowShY,				0.0f },
 		{ "BowShoulderZ",			'f', &g_cfg.bowShZ,				10.0f },
 		{ "BowShoulderSwapKey",		'i', &g_cfg.bowSwapKey,			18.0f },
+		{ "BowLockCamera",			'i', &g_cfg.bowLockCamera,		1.0f },
+		{ "LockAutoCombatOnly",		'i', &g_cfg.lockAutoCombatOnly,	1.0f },
+		{ "MoveLearnKey",			'i', &g_cfg.mvLearnKey,			68.0f },
 	};
 	const int kNumOpts = sizeof(g_opts) / sizeof(g_opts[0]);
 
@@ -608,8 +615,13 @@ namespace
 	}
 
 	int DotFilesFound();
+	void MvArm();
+	int MvLearnState();
+	int MvFoundOffset();
 
 	// Estado para o menu: 0 = perfil efetivo (1 sem TDM, 2 Coeus), 1 = LockOn.dll, 2 = Coeus.dll (0/1), 3 = lock-on ativo
+	void N_LearnMovement(StaticFunctionTag *) { MvArm(); }
+
 	SInt32 N_Status(StaticFunctionTag *, SInt32 what)
 	{
 		switch(what)
@@ -619,6 +631,8 @@ namespace
 			case 2: return (g_coeusExternal || g_coeusDirActive) ? 1 : 0;
 			case 3: return (g_lockActive || g_lockOwn) ? 1 : 0;
 			case 4: return DotFilesFound();
+			case 5: return MvLearnState();
+			case 6: return MvFoundOffset();
 		}
 		return 0;
 	}
@@ -633,6 +647,7 @@ namespace
 		registry->RegisterFunction(new NativeFunction2 <StaticFunctionTag, void, BSFixedString, float>("SetFloat", "SoftTargetNative", N_SetFloat, registry));
 		registry->RegisterFunction(new NativeFunction0 <StaticFunctionTag, void>("Reload", "SoftTargetNative", N_Reload, registry));
 		registry->RegisterFunction(new NativeFunction0 <StaticFunctionTag, void>("SaveAll", "SoftTargetNative", N_SaveAll, registry));
+		registry->RegisterFunction(new NativeFunction0 <StaticFunctionTag, void>("LearnMovement", "SoftTargetNative", N_LearnMovement, registry));
 		registry->RegisterFunction(new NativeFunction0 <StaticFunctionTag, void>("SaveProfile", "SoftTargetNative", N_SaveProfile, registry));
 		registry->RegisterFunction(new NativeFunction0 <StaticFunctionTag, SInt32>("LoadProfile", "SoftTargetNative", N_LoadProfile, registry));
 		registry->RegisterFunction(new NativeFunction0 <StaticFunctionTag, void>("ResetDefaults", "SoftTargetNative", N_ResetDefaults, registry));
@@ -1133,6 +1148,12 @@ namespace
 			else
 			{
 				score = dist;
+				if(g_cfg.lockAutoCombatOnly)
+				{
+					bool fight = a->IsInCombat();
+					for(int j = 0; !fight && j < hc; ++j) if(hid[j] == a->formID) fight = true;
+					if(!fight) continue;
+				}
 				// Escolha automatica: ate ao alcance circular qualquer direcao (tambem atras); mais longe so a frente da camera.
 				if(dist > g_cfg.lockAutoCircle)
 				{
@@ -1328,7 +1349,7 @@ namespace
 	const int kMvRegions = 14;				// 0 = o proprio PlayerControls; 1..13 = os seus manipuladores de input
 	const int kMvWords0 = 128;				// 0x200 bytes
 	const int kMvWordsH = 24;				// 0x60 bytes
-	struct MvCand { UInt8 dir[4]; UInt16 move; UInt16 idle; };
+	struct MvCand { UInt8 dir[4]; UInt8 sw[4]; UInt16 move; UInt16 idle; };
 	MvCand			g_mvCand[kMvRegions][kMvWords0];
 	int				g_mvMoveSamples = 0, g_mvIdleSamples = 0;
 	int				g_mvRegion = -1, g_mvWord = -1;
@@ -1364,23 +1385,162 @@ namespace
 		__except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 	}
 
+	// ---- v0.13.1: aprendizagem a pedido (Shift+F10 ou botao do menu).
+	// Carrega-se W, A, S, D um de cada vez durante ~15 s; para cada posicao de memoria conta-se quantas vezes o par de floats
+	// apontou para a direcao certa enquanto SO essa tecla estava premida. Sao aceites as que acertam em 3-4 direcoes.
+	volatile LONG	g_mvLearnState = 0;			// 0 nada, 1 a espera da primeira tecla, 2 a aprender, 3 encontrado, 4 falhou
+	DWORD			g_mvArmTick = 0, g_mvLearnStart = 0, g_mvLastVecLog = 0, g_mvLastEval = 0;
+	int				g_mvLR[6], g_mvLW[6], g_mvLS[6], g_mvLN = 0;
+
+	int MvLearnState() { return (g_mvLearnState == 1 || g_mvLearnState == 2 || g_mvLearnState == 4) ? (int)g_mvLearnState : (g_mvFound ? 3 : 0); }
+	int MvFoundOffset() { return g_mvFound ? g_mvWord * 4 : -1; }
+
+	void MvArm()
+	{
+		g_mvFound = 0; g_mvWant = 0; g_mvLN = 0;
+		memset(g_mvCand, 0, sizeof(g_mvCand));
+		g_mvMoveSamples = 0; g_mvIdleSamples = 0;
+		g_mvRegion = -1; g_mvWord = -1;
+		g_cfg.mvRegion = -1;
+		g_mvArmTick = GetTickCount(); g_mvLearnStart = 0;
+		g_mvLearnState = 1;
+		_MESSAGE("input: movement learning armed - now press W, A, S, D one at a time (hold each for 1-2 s, repeat a few times, about 15 s)");
+	}
+
+	int MvScoreOf(const MvCand & c, int minHits, int * sw, int * dirs)
+	{
+		int dn = 0, ds = 0, sn = 0, ss = 0;
+		for(int d = 0; d < 4; ++d)
+		{
+			if(c.dir[d] >= minHits) { ++dn; sn += c.dir[d]; }
+			if(c.sw[d]  >= minHits) { ++ds; ss += c.sw[d]; }
+		}
+		if(dn >= ds) { *sw = 0; *dirs = dn; return dn * 100000 + sn; }
+		*sw = 1; *dirs = ds; return ds * 100000 + ss;
+	}
+
+	void MvLogVec()
+	{
+		UInt32 w[kMvWords0];
+		int n = 0;
+		if(!MvReadRegion(0, w, &n)) return;
+		char line[320];
+		int len = 0;
+		for(int i = 7; i <= 17; ++i)
+			len += _snprintf_s(line + len, sizeof(line) - len, _TRUNCATE, " %X=%.2f", i * 4, W2F(w[i]));
+		_MESSAGE("probe-vec: keys W%d S%d A%d D%d |%s", (int)g_kFwd, (int)g_kBack, (int)g_kLeft, (int)g_kRight, line);
+	}
+
+	bool MvEvaluate(bool final)
+	{
+		const int minHits = final ? 5 : 10, needDirs = final ? 3 : 4;
+		int bestScore = -1;
+		for(int r = 0; r < kMvRegions; ++r)
+		{
+			const int nw = (r == 0) ? kMvWords0 : kMvWordsH;
+			for(int i = 0; i + 1 < nw; ++i)
+			{
+				int sw, dirs;
+				const int sc = MvScoreOf(g_mvCand[r][i], minHits, &sw, &dirs);
+				if(dirs >= needDirs && sc > bestScore) bestScore = sc;
+			}
+		}
+		if(bestScore < 0) return false;
+		int lr[6], lw[6], ls[6], n = 0, more = 0;
+		for(int r = 0; r < kMvRegions; ++r)
+		{
+			const int nw = (r == 0) ? kMvWords0 : kMvWordsH;
+			for(int i = 0; i + 1 < nw; ++i)
+			{
+				int sw, dirs;
+				const int sc = MvScoreOf(g_mvCand[r][i], minHits, &sw, &dirs);
+				if(dirs < needDirs || sc != bestScore) continue;
+				if(n < 6) { lr[n] = r; lw[n] = i; ls[n] = sw; ++n; } else ++more;
+			}
+		}
+		for(int k = 0; k < n; ++k) { g_mvLR[k] = lr[k]; g_mvLW[k] = lw[k]; g_mvLS[k] = ls[k]; }
+		g_mvLN = n;
+		g_mvRegion = lr[0]; g_mvWord = lw[0];
+		g_cfg.mvRegion = lr[0]; g_cfg.mvOffset = lw[0] * 4;
+		g_mvFound = 1;
+		g_mvLearnState = 3;
+		{
+			char list[96]; int len = 0; list[0] = 0;
+			for(int k = 0; k < n; ++k)
+				len += _snprintf_s(list + len, sizeof(list) - len, _TRUNCATE, "%s%d:%d:%d", k ? "," : "", lr[k], lw[k] * 4, ls[k]);
+			char b1[16], b2[16];
+			_snprintf_s(b1, sizeof(b1), _TRUNCATE, "%d", lr[0]);
+			_snprintf_s(b2, sizeof(b2), _TRUNCATE, "%d", lw[0] * 4);
+			WritePrivateProfileStringA("SoftTarget", "MoveVecRegion", b1, g_iniPath);
+			WritePrivateProfileStringA("SoftTarget", "MoveVecOffset", b2, g_iniPath);
+			WritePrivateProfileStringA("SoftTarget", "MoveVecList", list, g_iniPath);
+			_MESSAGE("input: movement vector found (%s): %d place(s) [region:offset:swapped] %s%s - saved to the ini",
+					 final ? "end of window" : "early", n, list, more ? " (+ more not used)" : "");
+		}
+		return true;
+	}
+
+	void MvLearnFail()
+	{
+		g_mvLearnState = 4;
+		_MESSAGE("input: learning FAILED (%d single-key samples) - the input rotation stays off. Best candidates:", g_mvMoveSamples);
+		int pr[5], pi[5], n = 0;
+		for(int k = 0; k < 5; ++k)
+		{
+			int bs = 0, br = -1, bi = -1;
+			for(int r = 0; r < kMvRegions; ++r)
+			{
+				const int nw = (r == 0) ? kMvWords0 : kMvWordsH;
+				for(int i = 0; i + 1 < nw; ++i)
+				{
+					bool used = false;
+					for(int j = 0; j < n; ++j) if(pr[j] == r && pi[j] == i) used = true;
+					if(used) continue;
+					int sw, dirs;
+					const int sc = MvScoreOf(g_mvCand[r][i], 1, &sw, &dirs);
+					if(sc > bs) { bs = sc; br = r; bi = i; }
+				}
+			}
+			if(br < 0) break;
+			pr[n] = br; pi[n] = bi; ++n;
+			const MvCand & c = g_mvCand[br][bi];
+			_MESSAGE("   region %d offset 0x%X: normal W%d S%d A%d D%d | swapped W%d S%d A%d D%d", br, bi * 4,
+					 (int)c.dir[0], (int)c.dir[1], (int)c.dir[2], (int)c.dir[3], (int)c.sw[0], (int)c.sw[1], (int)c.sw[2], (int)c.sw[3]);
+		}
+	}
+
+	// Chamada pela MvThread (cada ~2 ms) enquanto a aprendizagem esta armada.
 	void MvLearn(DWORD now)
 	{
-		if(g_mvFound || now - g_mvLastLearn < 12) return;
+		if(g_mvLearnState != 1 && g_mvLearnState != 2) return;
+		if(now - g_mvLastLearn < 2) return;
 		g_mvLastLearn = now;
 		const int nd = (g_kFwd ? 1 : 0) + (g_kBack ? 1 : 0) + (g_kLeft ? 1 : 0) + (g_kRight ? 1 : 0);
-		if(nd > 2) return;
-		const bool idle = (nd == 0);
-		int dir = -1; float ex = 0.0f, ey = 0.0f;
-		if(nd == 1)
+		if(g_mvLearnState == 1)
 		{
-			if(g_kFwd) { dir = 0; ey = 1.0f; }
-			else if(g_kBack) { dir = 1; ey = -1.0f; }
-			else if(g_kLeft) { dir = 2; ex = -1.0f; }
-			else { dir = 3; ex = 1.0f; }
+			if(now - g_mvArmTick > 60000)
+			{
+				g_mvLearnState = 4;
+				_MESSAGE("input: learning cancelled - no movement key was pressed within 60 s");
+				return;
+			}
+			if(nd == 0) return;
+			g_mvLearnStart = now; g_mvLastEval = now; g_mvLearnState = 2;
+			_MESSAGE("input: learning started - W, A, S, D one at a time for the next 15 s");
 		}
-		if(idle) ++g_mvIdleSamples; else ++g_mvMoveSamples;
-
+		if(now - g_mvLearnStart > 15000)
+		{
+			if(!MvEvaluate(true)) MvLearnFail();
+			return;
+		}
+		if(nd >= 1 && now - g_mvLastVecLog >= 150) { g_mvLastVecLog = now; MvLogVec(); }
+		if(nd != 1) return;
+		int dir; float ex = 0.0f, ey = 0.0f;
+		if(g_kFwd) { dir = 0; ey = 1.0f; }
+		else if(g_kBack) { dir = 1; ey = -1.0f; }
+		else if(g_kLeft) { dir = 2; ex = -1.0f; }
+		else { dir = 3; ex = 1.0f; }
+		++g_mvMoveSamples;
 		for(int r = 0; r < kMvRegions; ++r)
 		{
 			UInt32 w[kMvWords0];
@@ -1388,69 +1548,45 @@ namespace
 			if(!MvReadRegion(r, w, &n)) continue;
 			for(int i = 0; i + 1 < n; ++i)
 			{
-				const float x = W2F(w[i]), y = W2F(w[i + 1]);
-				if(!(x == x) || !(y == y)) continue;
-				if(fabsf(x) > 1.05f || fabsf(y) > 1.05f) continue;
+				const float p = W2F(w[i]), q = W2F(w[i + 1]);
+				if(!(p == p) || !(q == q)) continue;
+				if(fabsf(p) > 1.6f || fabsf(q) > 1.6f) continue;
+				const float len = sqrtf(p * p + q * q);
+				if(len < 0.3f) continue;
 				MvCand & c = g_mvCand[r][i];
-				const float len = sqrtf(x * x + y * y);
-				if(idle) { if(len < 0.02f && c.idle < 60000) ++c.idle; }
-				else
-				{
-					if(len > 0.9f && len < 1.1f && c.move < 60000) ++c.move;
-					if(dir >= 0 && fabsf(x - ex) < 0.12f && fabsf(y - ey) < 0.12f && c.dir[dir] < 250) ++c.dir[dir];
-				}
+				if((p * ex + q * ey) / len > 0.97f && c.dir[dir] < 250) ++c.dir[dir];
+				if((q * ex + p * ey) / len > 0.97f && c.sw[dir]  < 250) ++c.sw[dir];
 			}
 		}
-		if(g_mvMoveSamples < 40 || g_mvIdleSamples < 40) return;
+		if(now - g_mvLastEval >= 100) { g_mvLastEval = now; MvEvaluate(false); }
+	}
 
-		int bestR = -1, bestI = -1, bestScore = -1, ties = 0, bestDirs = 0;
-		for(int r = 0; r < kMvRegions; ++r)
+	// Le a lista guardada no ini (MoveVecList) ou, em alternativa, MoveVecRegion/MoveVecOffset.
+	bool MvLoadSaved()
+	{
+		char buf[128]; buf[0] = 0;
+		if(g_iniPath[0]) GetPrivateProfileStringA("SoftTarget", "MoveVecList", "", buf, sizeof(buf), g_iniPath);
+		int lr[6], lw[6], ls[6], n = 0;
+		char * p = buf;
+		while(*p && n < 6)
 		{
-			const int nw = (r == 0) ? kMvWords0 : kMvWordsH;
-			for(int i = 0; i + 1 < nw; ++i)
-			{
-				const MvCand & c = g_mvCand[r][i];
-				if(c.move < g_mvMoveSamples * 8 / 10 || c.idle < g_mvIdleSamples * 8 / 10) continue;
-				int dirs = 0;
-				for(int d = 0; d < 4; ++d) if(c.dir[d] >= 5) ++dirs;
-				const int score = dirs * 100000 + c.move + c.idle;
-				if(score > bestScore) { bestScore = score; bestR = r; bestI = i; bestDirs = dirs; ties = 0; }
-				else if(score == bestScore) ++ties;
-			}
+			char * e;
+			const long r = strtol(p, &e, 10); if(e == p || *e != ':') break; p = e + 1;
+			const long o = strtol(p, &e, 10); if(e == p || *e != ':') break; p = e + 1;
+			const long sw = strtol(p, &e, 10); if(e == p) break; p = e;
+			while(*p == ',' || *p == ' ') ++p;
+			if(r < 0 || r >= kMvRegions || o < 0 || o >= 0x200 || (o & 3)) continue;
+			lr[n] = (int)r; lw[n] = (int)(o / 4); ls[n] = sw ? 1 : 0; ++n;
 		}
-		// So aceita um candidato claro: pelo menos uma direcao confirmada e sem empates; senao continua a recolher.
-		if(bestR < 0 || bestDirs < 1 || ties > 0)
-		{
-			static int lastLogAt = 0;
-			if(g_mvMoveSamples - lastLogAt >= 500 || g_mvMoveSamples < lastLogAt)
-			{
-				lastLogAt = g_mvMoveSamples;
-				if(bestR >= 0)
-				{
-					const MvCand & c = g_mvCand[bestR][bestI];
-					_MESSAGE("input: not sure yet (best: region %d offset 0x%X, directions %d of 4 [W%d S%d A%d D%d], equal candidates %d, %d moving / %d idle samples) - keep walking with W, A, S, D one at a time",
-							 bestR, bestI * 4, bestDirs, (int)c.dir[0], (int)c.dir[1], (int)c.dir[2], (int)c.dir[3], ties, g_mvMoveSamples, g_mvIdleSamples);
-				}
-			}
-			if(g_mvMoveSamples > 4000)
-			{
-				_MESSAGE("input: no clear movement vector found (%d moving / %d idle samples) - the input rotation stays off; set MoveVecRegion/MoveVecOffset in the ini if you know them", g_mvMoveSamples, g_mvIdleSamples);
-				g_mvMoveSamples = -1000000;		// desiste (nao volta a tentar nesta sessao de jogo)
-			}
-			return;
-		}
-		g_mvRegion = bestR; g_mvWord = bestI; g_mvFound = 1;
-		g_cfg.mvRegion = bestR; g_cfg.mvOffset = bestI * 4;
-		{
-			// Guarda no ini (so estas duas chaves): nas proximas vezes nao e preciso procurar.
-			char b1[16], b2[16];
-			_snprintf_s(b1, sizeof(b1), _TRUNCATE, "%d", bestR);
-			_snprintf_s(b2, sizeof(b2), _TRUNCATE, "%d", bestI * 4);
-			WritePrivateProfileStringA("SoftTarget", "MoveVecRegion", b1, g_iniPath);
-			WritePrivateProfileStringA("SoftTarget", "MoveVecOffset", b2, g_iniPath);
-		}
-		_MESSAGE("input: movement vector found: region %d, byte offset 0x%X (directions matched %d of 4, other equal candidates %d) - saved to the ini (MoveVecRegion=%d, MoveVecOffset=%d)",
-				 bestR, bestI * 4, bestDirs, ties, bestR, bestI * 4);
+		if(n == 0 && g_cfg.mvRegion >= 0 && g_cfg.mvRegion < kMvRegions && g_cfg.mvOffset >= 0 && g_cfg.mvOffset < 0x200)
+		{ lr[0] = g_cfg.mvRegion; lw[0] = g_cfg.mvOffset / 4; ls[0] = 0; n = 1; }
+		if(n == 0) return false;
+		for(int k = 0; k < n; ++k) { g_mvLR[k] = lr[k]; g_mvLW[k] = lw[k]; g_mvLS[k] = ls[k]; }
+		g_mvLN = n;
+		g_mvRegion = lr[0]; g_mvWord = lw[0];
+		g_mvFound = 1;
+		_MESSAGE("input: movement vector loaded from the ini: %d place(s), first region %d offset 0x%X", n, lr[0], lw[0] * 4);
+		return true;
 	}
 
 	// Escreve o vetor ja rodado. Chamado muitas vezes por segundo pela thread do input (o jogo e o Coeus tambem o escrevem).
@@ -1468,16 +1604,21 @@ namespace
 		const float iy = -sx * sn + sy * cs;
 		__try
 		{
-			int n = 0;
-			UInt32 * b = MvBase(g_mvRegion, &n);
-			if(!b || g_mvWord + 1 >= n) return;
-			float * v = (float *)(b + g_mvWord);
-			if(g_mvHaveLast) { ++g_mvSeen; if(fabsf(v[0] - g_mvLastX) < 0.001f && fabsf(v[1] - g_mvLastY) < 0.001f) ++g_mvKept; }
-			v[0] = ix; v[1] = iy;
-			g_mvLastX = ix; g_mvLastY = iy; g_mvHaveLast = 1;
+			const int cnt = g_mvLN;
+			for(int k = 0; k < cnt; ++k)
+			{
+				int n = 0;
+				UInt32 * b = MvBase(g_mvLR[k], &n);
+				if(!b || g_mvLW[k] + 1 >= n) continue;
+				float * v = (float *)(b + g_mvLW[k]);
+				const float wx = g_mvLS[k] ? iy : ix, wy = g_mvLS[k] ? ix : iy;
+				if(k == 0 && g_mvHaveLast) { ++g_mvSeen; if(fabsf(v[0] - g_mvLastX) < 0.001f && fabsf(v[1] - g_mvLastY) < 0.001f) ++g_mvKept; }
+				v[0] = wx; v[1] = wy;
+				if(k == 0) { g_mvLastX = wx; g_mvLastY = wy; g_mvHaveLast = 1; }
+			}
 			++g_mvWrites;
 		}
-		__except(EXCEPTION_EXECUTE_HANDLER) { g_mvFound = 0; g_mvRegion = -1; g_mvWord = -1; g_mvMoveSamples = -1000000; }
+		__except(EXCEPTION_EXECUTE_HANDLER) { g_mvFound = 0; g_mvLN = 0; g_mvRegion = -1; g_mvWord = -1; }
 	}
 
 	DWORD WINAPI MvThread(LPVOID)
@@ -1485,6 +1626,7 @@ namespace
 		for(;;)
 		{
 			Sleep(1);
+			if(g_mvLearnState == 1 || g_mvLearnState == 2) { MvLearn(GetTickCount()); continue; }
 			if(!g_mvFound || !g_mvWant || GetTickCount() - g_mvWantTick > 120) { g_mvHaveLast = 0; continue; }
 			__try
 			{
@@ -2549,14 +2691,10 @@ namespace
 			}
 
 			// Rotacao do input: aprende onde esta o vetor de movimento e pede a thread do input para o rodar.
-			if(g_cfg.moveRemap && !g_mvFound)
+			if(g_cfg.moveRemap && !g_mvFound && g_mvLearnState == 0)
 			{
-				if(g_cfg.mvRegion >= 0 && g_cfg.mvRegion < kMvRegions && g_cfg.mvOffset >= 0 && g_cfg.mvOffset < 0x200)
-				{
-					g_mvRegion = g_cfg.mvRegion; g_mvWord = g_cfg.mvOffset / 4; g_mvFound = 1;
-					_MESSAGE("input: movement vector from the ini: region %d, byte offset 0x%X", g_mvRegion, g_cfg.mvOffset);
-				}
-				else if(g_mvMoveSamples >= -100000 && GameHasFocus()) MvLearn(now);
+				static DWORD lastIniTry = 0;
+				if(now - lastIniTry > 2000) { lastIniTry = now; MvLoadSaved(); }
 			}
 			g_mvWant = (remapOn && g_active && !suppress && g_moveHeld) ? 1 : 0;
 			g_mvWantTick = now;
@@ -2623,8 +2761,12 @@ namespace
 				// Lock-on proprio: a camera acompanha o alvo (SO no perfil normal; no FreeCam a camera e sempre do rato).
 				//  - camera presa ao corpo (0xB4 = 0): escreve-se o angulo da propria camera;
 				//  - camera de deslocamento (0xB4 = 1, TDM): o deslocamento caminha para (alvo - corpo).
-				if(g_lockOwn && g_cfg.lockCameraFollow && !coeusProfile)
+				const bool bowLockCam = coeusProfile && g_cfg.bowLockCamera && BowAiming(player);
+				if(g_lockOwn && ((g_cfg.lockCameraFollow && !coeusProfile) || bowLockCam))
 				{
+					// Com o arco puxado (FreeCam) a camera centra o alvo a partir da posicao REAL da camera, mais depressa e sem zona morta.
+					const float camSmooth = (bowLockCam && g_cfg.lockCameraSmooth < 14.0f) ? 14.0f : g_cfg.lockCameraSmooth;
+					const float dzRad = bowLockCam ? 0.0f : g_cfg.camDeadZoneDeg * kPi / 180.0f;
 					UInt8 * cs = ThirdPersonStatePtr();
 					if(cs)
 					{
@@ -2642,12 +2784,12 @@ namespace
 							wantYaw = WrapPi(wantYaw - g_cfg.aimOffX * kPi / 180.0f);		// alvo a direita do centro = camera um pouco mais a esquerda
 							{
 								// Zona morta: erros pequenos nao mexem a camera (os golpes do alvo nao a abanam); fora dela segue sem salto.
-								const float dz = g_cfg.camDeadZoneDeg * kPi / 180.0f;
+								const float dz = dzRad;
 								const float dl = WrapPi(wantYaw - cy);
 								if(fabsf(dl) <= dz) wantYaw = cy;
 								else wantYaw = WrapPi(cy + dl - (dl > 0.0f ? dz : -dz));
 							}
-							cy = WrapPi(cy + StepToward(cy, wantYaw, true, dt, maxRad, g_cfg.lockCameraSmooth));
+							cy = WrapPi(cy + StepToward(cy, wantYaw, true, dt, maxRad, camSmooth));
 							*(float *)(cs + 0x5C) = cy;
 							*(float *)(cs + 0x60) = cy;
 						}
@@ -2655,7 +2797,7 @@ namespace
 						{
 							float * off = (float *)(cs + 0xAC);
 							const float want = WrapPi(g_targetYaw - rot.z);
-							*off = WrapPi(*off + StepToward(*off, want, true, dt, maxRad, g_cfg.lockCameraSmooth));
+							*off = WrapPi(*off + StepToward(*off, want, true, dt, maxRad, camSmooth));
 						}
 
 						float o[3], dd[3];
@@ -2668,12 +2810,12 @@ namespace
 							if(want < -1.1f) want = -1.1f;
 							float cp = *(float *)(cs + 0x54);
 							{
-								const float dzp = g_cfg.camDeadZoneDeg * kPi / 180.0f;
+								const float dzp = dzRad;
 								const float dp = want - cp;
 								if(fabsf(dp) <= dzp) want = cp;
 								else want = cp + dp - (dp > 0.0f ? dzp : -dzp);
 							}
-							cp += StepToward(cp, want, false, dt, maxRad, g_cfg.lockCameraSmooth);
+							cp += StepToward(cp, want, false, dt, maxRad, camSmooth);
 							*(float *)(cs + 0x54) = cp;
 							*(float *)(cs + 0x58) = cp;
 						}
@@ -2932,6 +3074,7 @@ namespace
 				{
 					const int code = (int)button->keyMask;
 					if(InList(g_shiftKeys, g_numShiftKeys, code)) g_shiftHeld = held ? 1 : 0;
+					if(pressedNow && g_shiftHeld && g_cfg.mvLearnKey && code == g_cfg.mvLearnKey && !MenuBlocksInput()) MvArm();
 					if(pressedNow && g_shOn && g_cfg.bowSwapKey && code == g_cfg.bowSwapKey)
 					{
 						g_cfg.bowRight = g_cfg.bowRight ? 0 : 1;
