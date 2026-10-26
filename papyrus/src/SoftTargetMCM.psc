@@ -19,7 +19,7 @@ int ocount
 int lang		; 0 = English, 1 = Portugues
 
 int Function GetVersion()
-	return 11
+	return 12
 EndFunction
 
 Function InitTables()
@@ -398,13 +398,15 @@ Function PageLock()
 	AddSliderRow("AimOffsetX", T("Aim point: left / right", "Ponto de mira: esquerda / direita"), -20.0, 20.0, 0.5, 0.0, 1.0, 0, "{1} deg", T("Normal profile. For mods that move the aim point (AIM FIX, camera offset): where the locked target sits relative to the crosshair. Positive = to the right of the centre. If the crosshair is left of the target, raise it.", "Perfil normal. Para mods que mudam o ponto de mira (AIM FIX, câmera deslocada): onde o alvo preso fica em relação à mira. Positivo = à direita do centro. Se a mira ficar à esquerda do alvo, aumente."))
 	AddSliderRow("AimOffsetY", T("Aim point: up / down", "Ponto de mira: cima / baixo"), -20.0, 20.0, 0.5, 0.0, 1.0, 0, "{1} deg", T("Normal profile. Positive = the target sits above the centre of the screen.", "Perfil normal. Positivo = o alvo fica acima do centro do ecrã."))
 	AddSliderRow("LockCameraSmooth", T("Camera speed", "Velocidade da câmera"), 2.0, 20.0, 0.5, 8.0, 1.0, 0, "{1}", T("How fast the camera turns to the target. Higher is faster and less smooth.", "A velocidade com que a câmera vira para o alvo. Mais é mais rápido e menos suave."))
+	AddSliderRow("AimFilterMs", T("Camera stability", "Estabilidade da câmera"), 0.0, 1000.0, 50.0, 350.0, 0.001, 1, "{2} s", T("Averages the aim point over this time so the target's weapon swings and arm movements do not shake the camera. 0 = off. Higher is steadier but slower to follow.", "Faz a média do ponto de mira durante este tempo, para os golpes e movimentos de braço do alvo não abanarem a câmera. 0 = desligado. Mais é mais estável mas segue mais devagar."))
+	AddSliderRow("CameraDeadZoneDegrees", T("Camera dead zone", "Zona morta da câmera"), 0.0, 8.0, 0.5, 1.5, 1.0, 0, "{1} deg", T("The camera ignores aiming errors smaller than this. 0 = off.", "A câmera ignora erros de mira menores do que isto. 0 = desligado."))
 	AddHeaderOption(T("Shot prediction (only with lock-on)", "Previsão do disparo (só com lock-on)"))
 	AddEmptyOption()
 	AddToggleRow("PredictEnabled", T("Predict the shot", "Prever o disparo"), 1.0, T("While you draw a bow / crossbow or hold a spell button with the lock on, the aim leads a moving target. Without lock-on the shot is the normal one.", "Enquanto puxa o arco / besta ou segura o botão de uma magia com o lock ligado, a mira antecipa o alvo em movimento. Sem lock-on o disparo é o normal."))
 	AddSliderRow("PredictStrength", T("Prediction strength", "Força da previsão"), 0.0, 150.0, 5.0, 100.0, 1.0, 0, "{0} %", T("How much of the computed lead is applied. Lower if shots go too far ahead of the target, raise if they fall behind.", "Quanto da antecipação calculada é aplicada. Baixe se os tiros vão muito à frente do alvo, suba se ficam atrás."))
 	AddSliderRow("ProjectileSpeed", T("Projectile speed", "Velocidade do projétil"), 1000.0, 12000.0, 100.0, 4500.0, 1.0, 0, "{0}", T("Arrow speed of bows and crossbows, units per second. Spells use the speed in the game data (or SpellProjectileSpeed in the ini).", "Velocidade da flecha de arcos e bestas, em unidades por segundo. As magias usam a velocidade dos dados do jogo (ou SpellProjectileSpeed no ini)."))
 	AddSliderRow("ProjectileSpeedScale", T("Projectile speed fine tuning", "Ajuste fino da velocidade"), 20.0, 300.0, 5.0, 100.0, 1.0, 0, "{0} %", T("Shots land BEHIND a moving target: lower this. Shots land IN FRONT: raise it. Applies to arrows and spells.", "Os tiros caem ATRÁS do alvo em movimento: baixe. Caem À FRENTE: suba. Vale para flechas e magias."))
-	AddSliderRow("ProjectileGravity", T("Projectile drop", "Queda do projétil"), 0.0, 2000.0, 50.0, 450.0, 1.0, 0, "{0}", T("Bow and crossbow only: raises the aim to compensate for the arrow drop. 0 = no compensation.", "Só arco e besta: levanta a mira para compensar a queda da flecha. 0 = sem compensação."))
+	AddSliderRow("ProjectileGravity", T("Projectile drop", "Queda do projétil"), 0.0, 2000.0, 50.0, 470.0, 1.0, 0, "{0}", T("Bow and crossbow only: raises the aim to compensate for the arrow drop. 0 = no compensation.", "Só arco e besta: levanta a mira para compensar a queda da flecha. 0 = sem compensação."))
 	AddSliderRow("PredictMinDistance", T("Minimum distance", "Distância mínima"), 100.0, 2000.0, 50.0, 150.0, 1.0, 0, "{0}", T("Closer than this there is no prediction.", "Mais perto do que isto não há previsão."))
 EndFunction
 
