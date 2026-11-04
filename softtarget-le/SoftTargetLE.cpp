@@ -3179,6 +3179,18 @@ namespace
 extern "C"
 {
 
+// Lidas por outros mods (por exemplo NahIDWin) com GetProcAddress: formID do alvo do lock-on proprio (0 = nenhum).
+UInt32 __cdecl SoftTarget_GetLockedFormID()
+{
+	return g_lockOwn ? (UInt32)g_lockId : 0;
+}
+
+// formID do alvo da assistencia de mira (sem lock-on proprio); 0 = nenhum.
+UInt32 __cdecl SoftTarget_GetAssistFormID()
+{
+	return (g_active && !g_lockOwn) ? g_lastTargetId : 0;
+}
+
 bool SKSEPlugin_Query(const SKSEInterface * skse, PluginInfo * info)
 {
 	gLog.OpenRelative(CSIDL_MYDOCUMENTS, PLUGIN_LOG_FILE);

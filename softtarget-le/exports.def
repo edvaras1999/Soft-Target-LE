@@ -2,3 +2,5 @@ LIBRARY	"SoftTargetLE"
 EXPORTS
 SKSEPlugin_Query
 SKSEPlugin_Load
+SoftTarget_GetLockedFormID
+SoftTarget_GetAssistFormID
