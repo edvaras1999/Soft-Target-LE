@@ -31,7 +31,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.13.1 (aprendizagem do movimento com Shift+F10, lock com arco no FreeCam, ini FreeCam por omissao, escolha automatica so em combate)"
+#define PLUGIN_VERSION_STR	"0.13.2 (SoftTarget so em terceira pessoa e sem arco; camera do arco desligada por omissao)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -148,6 +148,9 @@ namespace
 		int		bowLockCamera;	// 1 = (perfil FreeCam) com o lock e o arco puxado a camera centra o alvo
 		int		lockAutoCombatOnly;	// 1 = a escolha automatica so apanha inimigos em combate
 		int		mvLearnKey;		// tecla (com Shift) que inicia a aprendizagem do vetor de movimento (68 = F10)
+		// ---- v0.13.2
+		int		noSoftFirstPerson;	// 1 = em primeira pessoa o SoftTarget automatico nao atua (so o lock proprio)
+		int		noSoftBow;			// 1 = com arco/besta (a puxar) o SoftTarget automatico nao atua
 	};
 	Config g_cfg;
 
@@ -233,7 +236,7 @@ namespace
 		{ "AimAdjustWheel",			'i', &g_cfg.aimAdjustWheel,		1.0f },
 		{ "AimAdjustUpKey",			'i', &g_cfg.aimUpKey,			201.0f },
 		{ "AimAdjustDownKey",		'i', &g_cfg.aimDownKey,			209.0f },
-		{ "BowShoulder",			'i', &g_cfg.bowShoulder,		1.0f },
+		{ "BowShoulder",			'i', &g_cfg.bowShoulder,		0.0f },
 		{ "BowShoulderRight",		'i', &g_cfg.bowRight,			1.0f },
 		{ "BowShoulderX",			'f', &g_cfg.bowShX,				40.0f },
 		{ "BowShoulderY",			'f', &g_cfg.bowShY,				0.0f },
@@ -242,6 +245,8 @@ namespace
 		{ "BowLockCamera",			'i', &g_cfg.bowLockCamera,		1.0f },
 		{ "LockAutoCombatOnly",		'i', &g_cfg.lockAutoCombatOnly,	1.0f },
 		{ "MoveLearnKey",			'i', &g_cfg.mvLearnKey,			68.0f },
+		{ "NoSoftTargetFirstPerson",'i', &g_cfg.noSoftFirstPerson,	1.0f },
+		{ "NoSoftTargetBow",		'i', &g_cfg.noSoftBow,			1.0f },
 	};
 	const int kNumOpts = sizeof(g_opts) / sizeof(g_opts[0]);
 
@@ -658,7 +663,7 @@ namespace
 
 	// ------------------------------------------------------------------ escolha do alvo
 	UInt32 g_lastTargetId = 0;
-	volatile LONG	g_endReason = 0;		// por que a ultima sessao acabou: 0 tempo, 1 correr, 2 lock-on externo, 3 sem alvo, 4 lock-on proprio desligado
+	volatile LONG	g_endReason = 0;		// por que a ultima sessao acabou: 0 tempo, 1 correr, 2 lock-on externo, 3 sem alvo, 4 lock-on proprio desligado, 5 primeira pessoa/arco
 	volatile LONG	g_forceCircle = 0;	// 1 = ignora o cone (usado pela ajuda do lock-on)
 	volatile LONG	g_active	= 0;		// 1 = sessao de combate em curso (o corpo encara o alvo mais proximo)
 	volatile LONG	g_shiftHeld = 0;		// Shift (ou outra tecla de ShiftKeys) carregado
@@ -1643,6 +1648,7 @@ namespace
 
 
 	bool BowAiming(PlayerCharacter * player);
+	bool SoftTargetBlocked();
 
 	// ------------------------------------------------------------------ corpo preso ao alvo enquanto anda (perfil FreeCam / Coeus)
 	// O Coeus roda o corpo para a direcao das teclas a cada frame; com a rotacao do input ativa o corpo tem de ficar no alvo.
@@ -2571,6 +2577,9 @@ namespace
 			// Lock-on externo ativo (SoftTarget em pausa): larga tudo, sem regressar ao rumo antigo.
 			if(LockPauses()) { phase = 0; if(g_active) g_endReason = 2; g_active = 0; }
 
+			// Primeira pessoa / arco: o SoftTarget automatico larga (o lock proprio continua).
+			if(g_active && !g_lockOwn && SoftTargetBlocked()) { g_endReason = 5; g_active = 0; phase = 0; }
+
 			// Lock-on assistido (LockOnMode=2): se o lock-on esta num inimigo que nao e o mais proximo,
 			// carrega na tecla de trocar alvo da LockOn.dll. Desliga-se sozinho se a tecla desligar o lock-on.
 			if(wasLock && !g_lockActive && keyAt && now - keyAt < 700 && !g_assistOff)
@@ -2652,8 +2661,8 @@ namespace
 			}
 			else if(!g_active && prevActive)
 			{
-				static const char * why[] = { "timeout", "sprint", "external lock-on active", "no target in range", "own lock-on off" };
-				_MESSAGE("session end: %s", why[(g_endReason >= 0 && g_endReason < 5) ? g_endReason : 0]);
+				static const char * why[] = { "timeout", "sprint", "external lock-on active", "no target in range", "own lock-on off", "first person / bow (no SoftTarget there)" };
+				_MESSAGE("session end: %s", why[(g_endReason >= 0 && g_endReason < 6) ? g_endReason : 0]);
 			}
 			prevActive = (g_active != 0);
 
@@ -2861,10 +2870,24 @@ namespace
 	// o alvo de um giro que ja esta em curso.
 	// Um toque de botao: se ja ha sessao so renova o temporizador (o corpo nao muda de alvo por causa
 	// do clique); senao escolhe o alvo mais proximo e abre a sessao.
+	// v0.13.2: SoftTarget so em terceira pessoa e sem arco/besta (o lock proprio nao e afetado).
+	bool SoftTargetBlocked()
+	{
+		if(g_lockOwn) return false;
+		if(g_cfg.noSoftFirstPerson && IsFirstPerson()) return true;
+		if(g_cfg.noSoftBow)
+		{
+			PlayerCharacter * p = Engine::Player();
+			if(p && (BowEquipped(p) || BowAiming(p))) return true;
+		}
+		return false;
+	}
+
 	bool AcquireAndTurn(int windowMs, bool /*extend*/)
 	{
 		// Lock-on ativo: LockOnMode=0 deixa o SoftTarget em pausa.
 		if(LockPauses()) return false;
+		if(SoftTargetBlocked()) return false;
 
 		if(g_active && !g_cfg.logOnly)
 		{
@@ -3178,18 +3201,6 @@ namespace
 
 extern "C"
 {
-
-// Lidas por outros mods (por exemplo NahIDWin) com GetProcAddress: formID do alvo do lock-on proprio (0 = nenhum).
-UInt32 __cdecl SoftTarget_GetLockedFormID()
-{
-	return g_lockOwn ? (UInt32)g_lockId : 0;
-}
-
-// formID do alvo da assistencia de mira (sem lock-on proprio); 0 = nenhum.
-UInt32 __cdecl SoftTarget_GetAssistFormID()
-{
-	return (g_active && !g_lockOwn) ? g_lastTargetId : 0;
-}
 
 bool SKSEPlugin_Query(const SKSEInterface * skse, PluginInfo * info)
 {
