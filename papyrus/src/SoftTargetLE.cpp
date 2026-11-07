@@ -31,7 +31,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.13.2 (SoftTarget so em terceira pessoa e sem arco; camera do arco desligada por omissao)"
+#define PLUGIN_VERSION_STR	"0.13.3 (exporta FormIDs do lock-on e da assistencia)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -3201,6 +3201,20 @@ namespace
 
 extern "C"
 {
+
+// API publica para outros plugins. Retorna 0 quando nao existe alvo valido.
+UInt32 SoftTarget_GetLockedFormID()
+{
+	if(!InterlockedCompareExchange(&g_lockOwn, 0, 0)) return 0;
+	return (UInt32)InterlockedCompareExchange(&g_lockId, 0, 0);
+}
+
+UInt32 SoftTarget_GetAssistFormID()
+{
+	if(!InterlockedCompareExchange(&g_assist, 0, 0)) return 0;
+	if(!InterlockedCompareExchange(&g_lockOwn, 0, 0)) return 0;
+	return (UInt32)InterlockedCompareExchange(&g_lockId, 0, 0);
+}
 
 bool SKSEPlugin_Query(const SKSEInterface * skse, PluginInfo * info)
 {

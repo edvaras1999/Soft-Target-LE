@@ -1,5 +1,7 @@
 # SoftTarget LE
 
+The DLL exports `SoftTarget_GetLockedFormID` and `SoftTarget_GetAssistFormID` for other plugins. Both return `0` when unavailable; the assist getter returns the locked actor's FormID only while ranged assist is active.
+
 Golpes auto-direcionados para Skyrim LE (1.9.32.0 + SKSE 1.7.3), sem Papyrus e sem travar a mira.
 Ao atacar, o personagem vira para o inimigo mais proximo dentro de um cone a frente.
 
