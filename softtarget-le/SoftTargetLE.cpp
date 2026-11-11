@@ -31,7 +31,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.13.3 (exporta FormIDs do lock-on e da assistencia)"
+#define PLUGIN_VERSION_STR	"0.14.0 (lock suave em primeira pessoa e com o arco: cede ao rato, um so escritor)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -151,6 +151,13 @@ namespace
 		// ---- v0.13.2
 		int		noSoftFirstPerson;	// 1 = em primeira pessoa o SoftTarget automatico nao atua (so o lock proprio)
 		int		noSoftBow;			// 1 = com arco/besta (a puxar) o SoftTarget automatico nao atua
+		// ---- v0.14.0: lock suave (perfil FreeCam, primeira pessoa e arco)
+		int		lockSoft;			// 1 = lock suave: cede ao rato, um so escritor (sem luta com o jogo)
+		int		lockMouseYieldMs;	// depois de mexer o rato o puxao fica a zero durante este tempo
+		int		lockMouseRampMs;	// e volta a subir ate ao normal durante este tempo
+		float	lockSoftSmooth;		// suavidade do puxao (maior = mais depressa)
+		float	lockSoftSpeedDeg;	// velocidade maxima do puxao, graus por segundo
+		float	lockSoftDeadZone;	// zona morta, graus
 	};
 	Config g_cfg;
 
@@ -247,6 +254,12 @@ namespace
 		{ "MoveLearnKey",			'i', &g_cfg.mvLearnKey,			68.0f },
 		{ "NoSoftTargetFirstPerson",'i', &g_cfg.noSoftFirstPerson,	1.0f },
 		{ "NoSoftTargetBow",		'i', &g_cfg.noSoftBow,			1.0f },
+		{ "LockSoftView",			'i', &g_cfg.lockSoft,			1.0f },
+		{ "LockMouseYieldMs",		'i', &g_cfg.lockMouseYieldMs,	150.0f },
+		{ "LockMouseRampMs",		'i', &g_cfg.lockMouseRampMs,	400.0f },
+		{ "LockSoftSmooth",			'f', &g_cfg.lockSoftSmooth,		6.0f },
+		{ "LockSoftSpeedDegPerSec",	'f', &g_cfg.lockSoftSpeedDeg,	240.0f },
+		{ "LockSoftDeadZoneDegrees",'f', &g_cfg.lockSoftDeadZone,	0.6f },
 	};
 	const int kNumOpts = sizeof(g_opts) / sizeof(g_opts[0]);
 
@@ -371,6 +384,16 @@ namespace
 		if(g_cfg.aimFilterMs > 1500.0f)		g_cfg.aimFilterMs = 1500.0f;
 		if(g_cfg.camDeadZoneDeg < 0.0f)		g_cfg.camDeadZoneDeg = 0.0f;
 		if(g_cfg.camDeadZoneDeg > 8.0f)		g_cfg.camDeadZoneDeg = 8.0f;
+		if(g_cfg.lockMouseYieldMs < 0)		g_cfg.lockMouseYieldMs = 0;
+		if(g_cfg.lockMouseYieldMs > 1000)	g_cfg.lockMouseYieldMs = 1000;
+		if(g_cfg.lockMouseRampMs < 1)		g_cfg.lockMouseRampMs = 1;
+		if(g_cfg.lockMouseRampMs > 3000)	g_cfg.lockMouseRampMs = 3000;
+		if(g_cfg.lockSoftSmooth < 0.5f)		g_cfg.lockSoftSmooth = 0.5f;
+		if(g_cfg.lockSoftSmooth > 40.0f)	g_cfg.lockSoftSmooth = 40.0f;
+		if(g_cfg.lockSoftSpeedDeg < 10.0f)	g_cfg.lockSoftSpeedDeg = 10.0f;
+		if(g_cfg.lockSoftSpeedDeg > 1440.0f)g_cfg.lockSoftSpeedDeg = 1440.0f;
+		if(g_cfg.lockSoftDeadZone < 0.0f)	g_cfg.lockSoftDeadZone = 0.0f;
+		if(g_cfg.lockSoftDeadZone > 5.0f)	g_cfg.lockSoftDeadZone = 5.0f;
 		if(g_cfg.speedScale < 20.0f)		g_cfg.speedScale = 20.0f;
 		if(g_cfg.speedScale > 300.0f)		g_cfg.speedScale = 300.0f;
 		if(g_cfg.aimOffX < -20.0f)			g_cfg.aimOffX = -20.0f;
@@ -1655,6 +1678,7 @@ namespace
 	// Esta thread repoe o corpo no alvo logo (sem limite de velocidade) e, com camera livre, compensa o deslocamento da camera
 	// para ela nao mexer.
 	volatile LONG	g_fastHold = 0;
+	volatile DWORD	g_mouseTick = 0;		// ultimo movimento do rato (para o lock suave ceder)
 	volatile DWORD	g_fastHoldTick = 0;
 	long			g_holdTicks = 0, g_holdFixes = 0;
 
@@ -2699,13 +2723,28 @@ namespace
 				yielding = false; g_yieldNow = 0;
 			}
 
+			// Lock suave (FreeCam, primeira pessoa e arco): um so escritor, cede ao rato. Em primeira pessoa e com o arco a camera
+			// e o corpo sao a mesma coisa, por isso nao ha rotacao do input nem corpo preso (era isso que lutava com o jogo).
+			const bool softFP = IsFirstPerson();
+			const bool softBow = g_cfg.bowLockCamera && BowAiming(player);
+			const bool softMode = coeusProfile && g_cfg.lockSoft && g_lockOwn && (softFP || softBow);
+			float yieldF = 1.0f;
+			if(softMode)
+			{
+				const float dtm = (float)(DWORD)(now - g_mouseTick);
+				const float ym = (float)g_cfg.lockMouseYieldMs, rm = (float)g_cfg.lockMouseRampMs;
+				yieldF = (dtm < ym) ? 0.0f : ((dtm < ym + rm) ? (dtm - ym) / rm : 1.0f);
+			}
+			const float softMax = g_cfg.lockSoftSpeedDeg * kPi / 180.0f * yieldF;
+			const float softDz = g_cfg.lockSoftDeadZone * kPi / 180.0f;
+
 			// Rotacao do input: aprende onde esta o vetor de movimento e pede a thread do input para o rodar.
 			if(g_cfg.moveRemap && !g_mvFound && g_mvLearnState == 0)
 			{
 				static DWORD lastIniTry = 0;
 				if(now - lastIniTry > 2000) { lastIniTry = now; MvLoadSaved(); }
 			}
-			g_mvWant = (remapOn && g_active && !suppress && g_moveHeld) ? 1 : 0;
+			g_mvWant = (remapOn && !softMode && g_active && !suppress && g_moveHeld) ? 1 : 0;
 			g_mvWantTick = now;
 			// Camera ao ombro com o arco (os dois perfis).
 			__try { ShoulderTick(player, dt, now); }
@@ -2724,7 +2763,7 @@ namespace
 			const bool firstPerson = IsFirstPerson();
 			// Inclinar o corpo (bracos): pela opcao de mira vertical, ou com o lock-on proprio a prever um disparo / em primeira pessoa.
 			const bool rangedNow = RangedHeld(player) || g_assist != 0;
-			const bool useTilt = g_hasPitch && (((g_cfg.verticalMode & 1) && rangedNow) || (g_lockOwn && (g_assist || firstPerson)));
+			const bool useTilt = g_hasPitch && !(softMode && softBow) && (((g_cfg.verticalMode & 1) && rangedNow) || (g_lockOwn && (g_assist || firstPerson)));
 
 			if(g_active && !suppress && !sprintHold)
 			{
@@ -2738,7 +2777,25 @@ namespace
 				}
 				else if(phase == 2) phase = 1;
 
-				const float stepYaw = fastHold ? 0.0f : StepToward(rot.z, g_targetYaw, true, dt, maxRad, g_cfg.smoothing);
+				float stepYaw;
+				if(fastHold) stepYaw = 0.0f;
+				else if(softMode)
+				{
+					if(softBow) stepYaw = 0.0f;		// com o arco o jogo ja leva o corpo atras da camera; so a camera e puxada
+					else
+					{
+						// Primeira pessoa: a vista e o corpo. Erro medido pela direcao REAL da vista, zona morta pequena, puxao suave.
+						float wy = g_targetYaw;
+						float o2[3], d2[3];
+						if(CameraRay(player, o2, d2))
+							wy = WrapPi(rot.z + WrapPi(atan2f(g_aimX - o2[0], g_aimY - o2[1]) - atan2f(d2[0], d2[1])));
+						const float dl = WrapPi(wy - rot.z);
+						if(fabsf(dl) <= softDz) wy = rot.z;
+						else wy = WrapPi(rot.z + dl - (dl > 0.0f ? softDz : -softDz));
+						stepYaw = StepToward(rot.z, wy, true, dt, softMax, g_cfg.lockSoftSmooth);
+					}
+				}
+				else stepYaw = StepToward(rot.z, g_targetYaw, true, dt, maxRad, g_cfg.smoothing);
 				if(coeusProfile && g_cfg.cameraHoldTdm)
 				{
 					UInt8 * hcs = ThirdPersonStatePtr();
@@ -2757,7 +2814,15 @@ namespace
 					float up = g_targetPitchUp;
 					if(up >  limitRad) up =  limitRad;
 					if(up < -limitRad) up = -limitRad;
-					rot.x += StepToward(rot.x, -up * vSign, false, dt, maxRad, g_cfg.smoothing);	// positivo = olhar para baixo
+					if(softMode)
+					{
+						float wp = -up * vSign;
+						const float dp = wp - rot.x;
+						if(fabsf(dp) <= softDz) wp = rot.x;
+						else wp = rot.x + dp - (dp > 0.0f ? softDz : -softDz);
+						rot.x += StepToward(rot.x, wp, false, dt, softMax, g_cfg.lockSoftSmooth);
+					}
+					else rot.x += StepToward(rot.x, -up * vSign, false, dt, maxRad, g_cfg.smoothing);	// positivo = olhar para baixo
 					if(!firstPerson) tiltUsed = true;		// em primeira pessoa rot.x e a propria vista: nao se repoe
 				}
 				else if(tiltUsed)
@@ -2774,8 +2839,9 @@ namespace
 				if(g_lockOwn && ((g_cfg.lockCameraFollow && !coeusProfile) || bowLockCam))
 				{
 					// Com o arco puxado (FreeCam) a camera centra o alvo a partir da posicao REAL da camera, mais depressa e sem zona morta.
-					const float camSmooth = (bowLockCam && g_cfg.lockCameraSmooth < 14.0f) ? 14.0f : g_cfg.lockCameraSmooth;
-					const float dzRad = bowLockCam ? 0.0f : g_cfg.camDeadZoneDeg * kPi / 180.0f;
+					const float camSmooth = softMode ? g_cfg.lockSoftSmooth : ((bowLockCam && g_cfg.lockCameraSmooth < 14.0f) ? 14.0f : g_cfg.lockCameraSmooth);
+					const float dzRad = softMode ? softDz : (bowLockCam ? 0.0f : g_cfg.camDeadZoneDeg * kPi / 180.0f);
+					const float camMax = softMode ? softMax : maxRad;
 					UInt8 * cs = ThirdPersonStatePtr();
 					if(cs)
 					{
@@ -2798,7 +2864,7 @@ namespace
 								if(fabsf(dl) <= dz) wantYaw = cy;
 								else wantYaw = WrapPi(cy + dl - (dl > 0.0f ? dz : -dz));
 							}
-							cy = WrapPi(cy + StepToward(cy, wantYaw, true, dt, maxRad, camSmooth));
+							cy = WrapPi(cy + StepToward(cy, wantYaw, true, dt, camMax, camSmooth));
 							*(float *)(cs + 0x5C) = cy;
 							*(float *)(cs + 0x60) = cy;
 						}
@@ -2806,7 +2872,7 @@ namespace
 						{
 							float * off = (float *)(cs + 0xAC);
 							const float want = WrapPi(g_targetYaw - rot.z);
-							*off = WrapPi(*off + StepToward(*off, want, true, dt, maxRad, camSmooth));
+							*off = WrapPi(*off + StepToward(*off, want, true, dt, camMax, camSmooth));
 						}
 
 						float o[3], dd[3];
@@ -2824,7 +2890,7 @@ namespace
 								if(fabsf(dp) <= dzp) want = cp;
 								else want = cp + dp - (dp > 0.0f ? dzp : -dzp);
 							}
-							cp += StepToward(cp, want, false, dt, maxRad, camSmooth);
+							cp += StepToward(cp, want, false, dt, camMax, camSmooth);
 							*(float *)(cs + 0x54) = cp;
 							*(float *)(cs + 0x58) = cp;
 						}
@@ -3061,6 +3127,15 @@ namespace
 			bool extraHeldNow = false;
 			for(InputEvent * e = *events; e; e = e->next)
 			{
+				if(e->eventType == InputEvent::kEventType_MouseMove)
+				{
+					// Movimento do rato (o lock suave cede). Os deslocamentos estao em +0x18 / +0x1C (como no ThumbstickEvent).
+					const SInt32 mx = *(SInt32 *)((UInt8 *)e + 0x18), my = *(SInt32 *)((UInt8 *)e + 0x1C);
+					static int mouseLogged = 0;
+					if(mouseLogged < 6 && (mx || my)) { ++mouseLogged; _MESSAGE("mouse move event: x=%d y=%d (layout check)", (int)mx, (int)my); }
+					if((mx || my) && mx > -100000 && mx < 100000 && my > -100000 && my < 100000) g_mouseTick = GetTickCount();
+					continue;
+				}
 				if(e->eventType != InputEvent::kEventType_Button) continue;
 
 				ButtonEvent * button = (ButtonEvent *)e;
