@@ -19,7 +19,7 @@ int ocount
 int lang		; 0 = English, 1 = Portugues
 
 int Function GetVersion()
-	return 17
+	return 18
 EndFunction
 
 Function InitTables()
@@ -109,6 +109,11 @@ string[] Function MenuChoices(int menuId)
 		r[3] = T("Cyan", "Ciano")
 		r[4] = T("Green", "Verde")
 		r[5] = T("Orange", "Laranja")
+	elseIf menuId == 10
+		r = new string[3]
+		r[0] = T("Off (older behaviour)", "Desligado (comportamento antigo)")
+		r[1] = T("Soft (free mouse, lock takes over when you attack)", "Suave (rato livre, o lock toma o controlo ao atacar)")
+		r[2] = T("Hard (view stays on the target, mouse blocked)", "Duro (vista presa ao alvo, rato bloqueado)")
 	elseIf menuId == 5
 		r = new string[2]
 		r[0] = T("Off", "Desligado")
@@ -382,10 +387,11 @@ Function PageCamera()
 		AddToggleRow("SprintKeepsAim", T("Sprint keeps the aim", "Correr mantém a mira"), 1.0, T("Sprinting does not release the SoftTarget or the lock-on (sprint attacks). Off = sprinting ends the SoftTarget.", "Correr não larga o SoftTarget nem o lock-on (ataques em corrida). Desligado = correr termina o SoftTarget."))
 		AddToggleRow("CameraHoldTdm", T("Keep the camera still when the body turns", "Câmera parada quando o corpo vira"), 1.0, T("When this mod turns the body toward an enemy, the camera stays where you put it and the mouse keeps moving only the camera (free camera style). Off = the camera follows the turning body.", "Quando este mod vira o corpo para um inimigo, a câmera fica onde a pôs e o rato continua a mexer só a câmera (câmera livre). Desligado = a câmera acompanha o corpo que vira."))
 		AddSliderRow("AttackPulseMs", T("Turn while walking", "Virar enquanto anda"), 0.0, 1500.0, 50.0, 350.0, 0.001, 1, "{2} s", T("Only when 'Face the target, move by screen' is off (or not working): each attack turns the walking body toward the enemy for this long. 0 = never.", "Só quando 'Encarar o alvo, andar pelo ecrã' está desligado (ou não funciona): cada ataque vira o corpo em movimento para o inimigo durante este tempo. 0 = nunca."))
-		AddHeaderOption(T("Soft lock (first person and bow)", "Lock suave (primeira pessoa e arco)"))
+		AddHeaderOption(T("View with the lock (first person and bow)", "Vista com o lock (primeira pessoa e arco)"))
 		AddEmptyOption()
-		AddToggleRow("LockSoftView", T("Soft lock", "Lock suave"), 1.0, T("In first person and with the bow, the lock pulls the view toward the target gently, gives way while you move the mouse and eases back when you stop, without fighting the game camera. Turn off to get the older, harder behaviour.", "Em primeira pessoa e com o arco, o lock puxa a vista para o alvo com suavidade, cede enquanto mexe o rato e volta devagar quando pára, sem lutar com a câmera do jogo. Desligue para voltar ao comportamento antigo, mais duro."))
-		AddSliderRow("LockMouseYieldMs", T("Give way after mouse move", "Ceder depois de mexer o rato"), 0.0, 500.0, 25.0, 150.0, 0.001, 1, "{2} s", T("After you move the mouse the pull stays at zero for this long.", "Depois de mexer o rato o puxão fica a zero durante este tempo."))
+		AddMenuRow("LockViewMode", T("View with the lock", "Vista com o lock"), 10, 2.0, T("First person and bow (FreeCam profile, lock on). Hard: the camera stays on the target and the mouse is blocked, you move freely and M1/M2 turn the body; no fight with the camera. Soft: the mouse is free, but when you attack the lock takes full control. Off: older behaviour.", "Primeira pessoa e arco (perfil FreeCam, com o lock ligado). Duro: a câmera fica no alvo e o rato fica bloqueado, anda livremente e M1/M2 viram o corpo; sem luta com a câmera. Suave: o rato é livre, mas ao atacar o lock toma o controlo total. Desligado: comportamento antigo."))
+		AddKeyRow("LockFreeLookKey", T("Free look key", "Tecla de olhar livremente"), T("While you hold this key the view is free (the lock stays on); when you let go the view eases back to the target. Default Shift (it is also sprint). 0 = none.", "Enquanto segurar esta tecla a vista fica livre (o lock continua ligado); ao soltar a vista volta ao alvo com suavidade. Padrão: Shift (que também é correr). 0 = nenhuma."))
+		AddSliderRow("LockMouseYieldMs", T("Soft: give way after mouse move", "Suave: ceder depois de mexer o rato"), 0.0, 500.0, 25.0, 150.0, 0.001, 1, "{2} s", T("After you move the mouse the pull stays at zero for this long.", "Depois de mexer o rato o puxão fica a zero durante este tempo."))
 		AddSliderRow("LockMouseRampMs", T("Ease back time", "Tempo de regresso"), 50.0, 1500.0, 50.0, 400.0, 0.001, 1, "{2} s", T("How long the pull takes to come back to full strength. Longer is gentler.", "Quanto tempo o puxão demora a voltar à força total. Mais longo é mais suave."))
 		AddSliderRow("LockSoftSmooth", T("Pull smoothness", "Suavidade do puxão"), 1.0, 20.0, 1.0, 6.0, 1.0, 0, "{0}", T("Lower = slower and softer, higher = quicker. If the view shakes, lower it.", "Menor = mais lento e suave, maior = mais rápido. Se a vista tremer, baixe."))
 		AddSliderRow("LockSoftSpeedDegPerSec", T("Pull speed limit", "Limite de velocidade do puxão"), 30.0, 720.0, 30.0, 240.0, 1.0, 0, "{0} deg/s", T("The view never turns toward the target faster than this.", "A vista nunca vira para o alvo mais depressa do que isto."))
