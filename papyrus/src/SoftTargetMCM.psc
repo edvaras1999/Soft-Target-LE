@@ -19,7 +19,7 @@ int ocount
 int lang		; 0 = English, 1 = Portugues
 
 int Function GetVersion()
-	return 18
+	return 19
 EndFunction
 
 Function InitTables()
@@ -416,6 +416,9 @@ Function PageCamera()
 	AddSliderRow("BowShoulderY", T("Shoulder: closer / farther", "Ombro: mais perto / mais longe"), -100.0, 100.0, 2.0, 0.0, 1.0, 0, "{0}", T("Added to the normal camera offset. Positive = camera forward (closer), negative = farther.", "Somado ao deslocamento normal da câmera. Positivo = câmera para a frente (mais perto), negativo = mais longe."))
 	AddSliderRow("BowShoulderZ", T("Shoulder: height", "Ombro: altura"), -60.0, 80.0, 2.0, 10.0, 1.0, 0, "{0}", T("Added to the normal camera height.", "Somado à altura normal da câmera."))
 	AddKeyRow("BowShoulderSwapKey", T("Swap shoulder key", "Tecla de trocar de ombro"), T("Pressed while the bow is drawn it swaps shoulder. Default E (also the Activate key).", "Carregada com o arco puxado troca de ombro. Padrão: E (também é a tecla de ativar)."))
+	AddHeaderOption(T("Animation mods (DMK compatibility)", "Mods de animação (compatibilidade DMK)"))
+	AddEmptyOption()
+	AddToggleRow("DmkCompat", T("Publish DMK animation variables", "Publicar as variáveis de animação do DMK"), 0.0, T("For animation packs made for Directional Movement Keys (OAR conditions on DirecionalCycleMoveset and CameraMovementCMF). Publishes the movement direction (relative to the body, so it follows the FreeCam profile) and the camera direction. Needs SoftTarget_BDI.json in SKSE/Plugins/BehaviorDataInjector. Off by default. Do not use together with another DMK.", "Para pacotes de animação feitos para o Directional Movement Keys (condições OAR em DirecionalCycleMoveset e CameraMovementCMF). Publica a direção do movimento (relativa ao corpo, por isso acompanha o perfil FreeCam) e a direção da câmera. Precisa do SoftTarget_BDI.json em SKSE/Plugins/BehaviorDataInjector. Desligado por padrão. Não use junto com outro DMK."))
 EndFunction
 
 Function PageLock()
