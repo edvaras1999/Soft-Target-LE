@@ -20,6 +20,7 @@
 #include "skse/PapyrusVM.h"
 #include "skse/PapyrusNativeFunctions.h"
 #include "skse/Hooks_UI.h"
+#include "skse/GameThreads.h"
 #include "skse/ScaleformMovie.h"
 #include "skse/ScaleformCallbacks.h"
 #include "Log.h"
@@ -31,7 +32,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.14.1 (vista presa ao alvo com o lock em primeira pessoa e com o arco: modo duro por omissao, tecla de olhar livremente)"
+#define PLUGIN_VERSION_STR	"0.15.0 (compatibilidade DMK: variaveis DirecionalCycleMoveset e CameraMovementCMF para animacoes OAR; desligada por omissao)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -159,6 +160,8 @@ namespace
 		float	lockSoftSmooth;		// suavidade do puxao (maior = mais depressa)
 		float	lockSoftSpeedDeg;	// velocidade maxima do puxao, graus por segundo
 		float	lockSoftDeadZone;	// zona morta, graus
+		// ---- v0.15.0: compatibilidade DMK (variaveis de animacao do jogador para pacotes OAR)
+		int		dmkCompat;			// 1 = publica DirecionalCycleMoveset (direcao do movimento) e CameraMovementCMF (direcao da camera)
 	};
 	Config g_cfg;
 
@@ -262,6 +265,7 @@ namespace
 		{ "LockSoftSmooth",			'f', &g_cfg.lockSoftSmooth,		6.0f },
 		{ "LockSoftSpeedDegPerSec",	'f', &g_cfg.lockSoftSpeedDeg,	240.0f },
 		{ "LockSoftDeadZoneDegrees",'f', &g_cfg.lockSoftDeadZone,	0.6f },
+		{ "DmkCompat",				'i', &g_cfg.dmkCompat,			0.0f },
 	};
 	const int kNumOpts = sizeof(g_opts) / sizeof(g_opts[0]);
 
@@ -396,6 +400,8 @@ namespace
 		if(g_cfg.lockSoftSpeedDeg > 1440.0f)g_cfg.lockSoftSpeedDeg = 1440.0f;
 		if(g_cfg.lockSoftDeadZone < 0.0f)	g_cfg.lockSoftDeadZone = 0.0f;
 		if(g_cfg.lockSoftDeadZone > 5.0f)	g_cfg.lockSoftDeadZone = 5.0f;
+		if(g_cfg.dmkCompat < 0)				g_cfg.dmkCompat = 0;
+		if(g_cfg.dmkCompat > 1)				g_cfg.dmkCompat = 1;
 		if(g_cfg.speedScale < 20.0f)		g_cfg.speedScale = 20.0f;
 		if(g_cfg.speedScale > 300.0f)		g_cfg.speedScale = 300.0f;
 		if(g_cfg.aimOffX < -20.0f)			g_cfg.aimOffX = -20.0f;
@@ -1667,6 +1673,156 @@ namespace
 				MvApply(atan2f(d[0], d[1]), Engine::Rotation(player).z);
 			}
 			__except(EXCEPTION_EXECUTE_HANDLER) { }
+		}
+		return 0;
+	}
+
+	// ------------------------------------------------------------------ compatibilidade DMK (v0.15.0)
+	// Publica no grafo de animacao do jogador as variaveis que os pacotes OAR feitos para o "Directional Movement Keys" leem:
+	//   DirecionalCycleMoveset: 0 parado, 1 frente, 2 frente-direita, 3 direita, 4 tras-direita, 5 tras, 6 tras-esquerda,
+	//                           7 esquerda, 8 frente-esquerda, 9 frente+tras, 10 esquerda+direita, 11-14 tres teclas
+	//   CameraMovementCMF:      mesma ideia (1-8) para o movimento da camera (rato)
+	// A direcao e a do corpo: com a rotacao do input (perfil FreeCam) usa o vetor ja rodado, senao as teclas.
+	// A escrita usa a rotina interna do jogo (a mesma do SetAnimationVariableInt do Papyrus), sem Papyrus e na thread do jogo.
+	// Os enderecos sao os do Skyrim LE 1.9.32; antes de os usar confere-se os bytes da rotina.
+	typedef bool (__fastcall * DmkSetIntFn)(void * holder, void * edxUnused, const BSFixedString * name, SInt32 value);
+	const UInt32	kDmkSetIntAddr	= 0x00650C80;
+	const UInt32	kDmkInnerAddr	= 0x00650960;
+	volatile LONG	g_dmkReady		= 0;		// 1 = rotina confirmada
+	volatile LONG	g_dmkFaults		= 0;
+	volatile LONG	g_dmkMx			= 0;		// deslocamento acumulado do rato (para CameraMovementCMF)
+	volatile LONG	g_dmkMy			= 0;
+	volatile LONG	g_dmkDir		= 0;		// ultimo valor calculado
+	volatile LONG	g_dmkCam		= 0;
+	volatile LONG	g_dmkPending	= 0;
+	volatile DWORD	g_dmkQueuedAt	= 0;
+	BSFixedString *	g_dmkNameDir	= NULL;
+	BSFixedString *	g_dmkNameCam	= NULL;
+
+	void DmkInit()
+	{
+		static const UInt8 kSig[]   = { 0x8B,0x54,0x24,0x04, 0x8D,0x44,0x24,0x08, 0x50, 0x52, 0xE8,0xD1,0xFC,0xFF,0xFF, 0xC2,0x08,0x00 };
+		static const UInt8 kInner[] = { 0x83,0xEC,0x10, 0x8B,0x01, 0x8B,0x40,0x08 };
+		g_dmkReady = 0;
+		__try
+		{
+			const bool a = memcmp((const void *)kDmkSetIntAddr, kSig, sizeof(kSig)) == 0;
+			const bool b = memcmp((const void *)kDmkInnerAddr, kInner, sizeof(kInner)) == 0;
+			if(a && b) { g_dmkReady = 1; _MESSAGE("dmk: engine routine SetAnimationVariableInt confirmed at 0x%08X (this build is compatible)", (unsigned)kDmkSetIntAddr); }
+			else _MESSAGE("dmk: engine routine NOT recognised (%d/%d) - the DMK compatibility stays OFF (is this Skyrim LE 1.9.32?)", (int)a, (int)b);
+		}
+		__except(EXCEPTION_EXECUTE_HANDLER) { _MESSAGE("dmk: could not read the engine routine - the DMK compatibility stays OFF"); }
+	}
+
+	// Corre na thread do jogo.
+	void DmkWriteNow(int dir, int cam)
+	{
+		if(!g_dmkReady || g_dmkFaults >= 3) return;
+		__try
+		{
+			PlayerCharacter * player = Engine::Player();
+			if(!player) return;
+			if(!g_dmkNameDir) g_dmkNameDir = new BSFixedString("DirecionalCycleMoveset");
+			if(!g_dmkNameCam) g_dmkNameCam = new BSFixedString("CameraMovementCMF");
+			void * holder = (void *)((UInt8 *)player + 0x20);
+			DmkSetIntFn fn = (DmkSetIntFn)kDmkSetIntAddr;
+			const bool okD = fn(holder, NULL, g_dmkNameDir, (SInt32)dir);
+			const bool okC = fn(holder, NULL, g_dmkNameCam, (SInt32)cam);
+			static int logged = 0;
+			static DWORD lastFailLog = 0;
+			if(logged < 40 && (dir != 0 || cam != 0)) { ++logged; _MESSAGE("dmk: direction=%d camera=%d (graph write: direction %s, camera %s)", dir, cam, okD ? "ok" : "failed", okC ? "ok" : "failed"); }
+			if((!okD || !okC) && GetTickCount() - lastFailLog > 30000)
+			{ lastFailLog = GetTickCount(); _MESSAGE("dmk: the graph did not accept the variable (%s%s) - is SoftTarget_BDI.json installed and BDI loaded?", okD ? "" : "DirecionalCycleMoveset ", okC ? "" : "CameraMovementCMF"); }
+		}
+		__except(EXCEPTION_EXECUTE_HANDLER)
+		{
+			++g_dmkFaults;
+			_MESSAGE("dmk: fault #%ld while writing the variables%s", (long)g_dmkFaults, g_dmkFaults >= 3 ? " - DMK compatibility disabled" : "");
+		}
+	}
+
+	class DmkTask : public TaskDelegate
+	{
+	public:
+		DmkTask(int d, int c) : m_d(d), m_c(c) { }
+		virtual void Run(void) { DmkWriteNow(m_d, m_c); g_dmkPending = 0; }
+		virtual void Dispose(void) { delete this; }
+	private:
+		int m_d, m_c;
+	};
+
+	inline int DmkSectorFromVec(float x, float y)	// x = direita, y = frente
+	{
+		float deg = atan2f(x, y) * 180.0f / kPi;
+		if(deg < 0.0f) deg += 360.0f;
+		return ((int)((deg + 22.5f) / 45.0f)) % 8 + 1;
+	}
+
+	DWORD WINAPI DmkThread(LPVOID)
+	{
+		int lastDir = -1, lastCam = -1;
+		DWORD lastWrite = 0, camTick = 0;
+		int camVal = 0;
+		for(;;)
+		{
+			Sleep(8);
+			const DWORD now = GetTickCount();
+			int dir = 0, cam = 0;
+			if(g_cfg.dmkCompat && g_dmkReady && g_taskIface)
+			{
+				__try
+				{
+					if(!MenuBlocksInput())
+					{
+						const bool f = g_kFwd, b = g_kBack, l = g_kLeft, r = g_kRight;
+						if(f || b || l || r)
+						{
+							if(l && f && r) dir = 11;
+							else if(b && f && r) dir = 12;
+							else if(l && b && r) dir = 13;
+							else if(b && f && l) dir = 14;
+							else if(f && b) dir = 9;
+							else if(l && r) dir = 10;
+							else
+							{
+								float x = (r ? 1.0f : 0.0f) - (l ? 1.0f : 0.0f), y = (f ? 1.0f : 0.0f) - (b ? 1.0f : 0.0f);
+								PlayerCharacter * player = Engine::Player();
+								float o[3], d[3];
+								if(player && g_mvFound && g_mvWant && (now - g_mvWantTick) <= 120 && CameraRay(player, o, d))
+								{
+									const float dd = WrapPi(atan2f(d[0], d[1]) - Engine::Rotation(player).z);
+									const float cs = cosf(dd), sn = sinf(dd);
+									const float nx = x * cs + y * sn, ny = -x * sn + y * cs;
+									x = nx; y = ny;
+								}
+								dir = DmkSectorFromVec(x, y);
+							}
+						}
+						// camera: movimento do rato (mantem-se 120 ms depois do ultimo movimento)
+						const LONG dx = InterlockedExchange(&g_dmkMx, 0), dy = InterlockedExchange(&g_dmkMy, 0);
+						const bool h = (dx >= 2 || dx <= -2), v = (dy >= 2 || dy <= -2);
+						if(h || v)
+						{
+							const bool up = v && dy < 0, down = v && dy > 0, left = h && dx < 0, right = h && dx > 0;
+							if(up && left) camVal = 8; else if(up && right) camVal = 2; else if(down && left) camVal = 6; else if(down && right) camVal = 4;
+							else if(up) camVal = 1; else if(left) camVal = 7; else if(down) camVal = 5; else camVal = 3;
+							camTick = now;
+						}
+						else if(now - camTick > 120) camVal = 0;
+						cam = camVal;
+					}
+				}
+				__except(EXCEPTION_EXECUTE_HANDLER) { dir = 0; cam = 0; }
+			}
+			else if(lastDir <= 0 && lastCam <= 0) { lastDir = lastCam = 0; continue; }	// desligado e ja a zero: nada a fazer
+			g_dmkDir = dir; g_dmkCam = cam;
+			const bool changed = (dir != lastDir || cam != lastCam);
+			if(!changed && now - lastWrite < 500) continue;		// refresca de meio em meio segundo (o grafo reinicia ao mudar de area)
+			if(g_dmkPending && now - g_dmkQueuedAt < 500) continue;
+			if(!g_taskIface) continue;
+			lastDir = dir; lastCam = cam; lastWrite = now;
+			g_dmkPending = 1; g_dmkQueuedAt = now;
+			g_taskIface->AddTask(new DmkTask(dir, cam));
 		}
 		return 0;
 	}
@@ -3164,7 +3320,11 @@ namespace
 					const SInt32 mx = *(SInt32 *)((UInt8 *)e + 0x18), my = *(SInt32 *)((UInt8 *)e + 0x1C);
 					static int mouseLogged = 0;
 					if(mouseLogged < 6 && (mx || my)) { ++mouseLogged; _MESSAGE("mouse move event: x=%d y=%d (layout check)", (int)mx, (int)my); }
-					if((mx || my) && mx > -100000 && mx < 100000 && my > -100000 && my < 100000) g_mouseTick = GetTickCount();
+					if((mx || my) && mx > -100000 && mx < 100000 && my > -100000 && my < 100000)
+					{
+						g_mouseTick = GetTickCount();
+						InterlockedExchangeAdd(&g_dmkMx, mx); InterlockedExchangeAdd(&g_dmkMy, my);
+					}
 					continue;
 				}
 				if(e->eventType != InputEvent::kEventType_Button) continue;
@@ -3297,6 +3457,8 @@ namespace
 				CreateThread(NULL, 0, TurnThread, NULL, 0, NULL);
 				CreateThread(NULL, 0, MvThread, NULL, 0, NULL);
 				CreateThread(NULL, 0, HoldThread, NULL, 0, NULL);
+				DmkInit();
+				CreateThread(NULL, 0, DmkThread, NULL, 0, NULL);
 				_MESSAGE("input receiver registered, turn thread started");
 				break;
 			}
