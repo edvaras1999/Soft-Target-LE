@@ -1714,16 +1714,21 @@ namespace
 		__except(EXCEPTION_EXECUTE_HANDLER) { _MESSAGE("dmk: could not read the engine routine - the DMK compatibility stays OFF"); }
 	}
 
+	void DmkMakeNames()		// fora de qualquer __try (o new precisa de desenrolar)
+	{
+		if(!g_dmkNameDir) g_dmkNameDir = new BSFixedString("DirecionalCycleMoveset");
+		if(!g_dmkNameCam) g_dmkNameCam = new BSFixedString("CameraMovementCMF");
+	}
+
 	// Corre na thread do jogo.
 	void DmkWriteNow(int dir, int cam)
 	{
 		if(!g_dmkReady || g_dmkFaults >= 3) return;
+		DmkMakeNames();
 		__try
 		{
 			PlayerCharacter * player = Engine::Player();
 			if(!player) return;
-			if(!g_dmkNameDir) g_dmkNameDir = new BSFixedString("DirecionalCycleMoveset");
-			if(!g_dmkNameCam) g_dmkNameCam = new BSFixedString("CameraMovementCMF");
 			void * holder = (void *)((UInt8 *)player + 0x20);
 			DmkSetIntFn fn = (DmkSetIntFn)kDmkSetIntAddr;
 			const bool okD = fn(holder, NULL, g_dmkNameDir, (SInt32)dir);
@@ -1758,6 +1763,56 @@ namespace
 		return ((int)((deg + 22.5f) / 45.0f)) % 8 + 1;
 	}
 
+	void DmkCompute(DWORD now, int * pdir, int * pcam, int * pcamVal, DWORD * pcamTick)
+	{
+		int dir = 0, cam = 0, camVal = *pcamVal;
+		DWORD camTick = *pcamTick;
+		__try
+		{
+			if(!MenuBlocksInput())
+			{
+				const bool f = g_kFwd, b = g_kBack, l = g_kLeft, r = g_kRight;
+				if(f || b || l || r)
+				{
+					if(l && f && r) dir = 11;
+					else if(b && f && r) dir = 12;
+					else if(l && b && r) dir = 13;
+					else if(b && f && l) dir = 14;
+					else if(f && b) dir = 9;
+					else if(l && r) dir = 10;
+					else
+					{
+						float x = (r ? 1.0f : 0.0f) - (l ? 1.0f : 0.0f), y = (f ? 1.0f : 0.0f) - (b ? 1.0f : 0.0f);
+						PlayerCharacter * player = Engine::Player();
+						float o[3], d[3];
+						if(player && g_mvFound && g_mvWant && (now - g_mvWantTick) <= 120 && CameraRay(player, o, d))
+						{
+							const float dd = WrapPi(atan2f(d[0], d[1]) - Engine::Rotation(player).z);
+							const float cs = cosf(dd), sn = sinf(dd);
+							const float nx = x * cs + y * sn, ny = -x * sn + y * cs;
+							x = nx; y = ny;
+						}
+						dir = DmkSectorFromVec(x, y);
+					}
+				}
+				// camera: movimento do rato (mantem-se 120 ms depois do ultimo movimento)
+				const LONG dx = InterlockedExchange(&g_dmkMx, 0), dy = InterlockedExchange(&g_dmkMy, 0);
+				const bool h = (dx >= 2 || dx <= -2), v = (dy >= 2 || dy <= -2);
+				if(h || v)
+				{
+					const bool up = v && dy < 0, down = v && dy > 0, left = h && dx < 0, right = h && dx > 0;
+					if(up && left) camVal = 8; else if(up && right) camVal = 2; else if(down && left) camVal = 6; else if(down && right) camVal = 4;
+					else if(up) camVal = 1; else if(left) camVal = 7; else if(down) camVal = 5; else camVal = 3;
+					camTick = now;
+				}
+				else if(now - camTick > 120) camVal = 0;
+				cam = camVal;
+			}
+		}
+		__except(EXCEPTION_EXECUTE_HANDLER) { dir = 0; cam = 0; }
+		*pdir = dir; *pcam = cam; *pcamVal = camVal; *pcamTick = camTick;
+	}
+
 	DWORD WINAPI DmkThread(LPVOID)
 	{
 		int lastDir = -1, lastCam = -1;
@@ -1770,49 +1825,7 @@ namespace
 			int dir = 0, cam = 0;
 			if(g_cfg.dmkCompat && g_dmkReady && g_taskIface)
 			{
-				__try
-				{
-					if(!MenuBlocksInput())
-					{
-						const bool f = g_kFwd, b = g_kBack, l = g_kLeft, r = g_kRight;
-						if(f || b || l || r)
-						{
-							if(l && f && r) dir = 11;
-							else if(b && f && r) dir = 12;
-							else if(l && b && r) dir = 13;
-							else if(b && f && l) dir = 14;
-							else if(f && b) dir = 9;
-							else if(l && r) dir = 10;
-							else
-							{
-								float x = (r ? 1.0f : 0.0f) - (l ? 1.0f : 0.0f), y = (f ? 1.0f : 0.0f) - (b ? 1.0f : 0.0f);
-								PlayerCharacter * player = Engine::Player();
-								float o[3], d[3];
-								if(player && g_mvFound && g_mvWant && (now - g_mvWantTick) <= 120 && CameraRay(player, o, d))
-								{
-									const float dd = WrapPi(atan2f(d[0], d[1]) - Engine::Rotation(player).z);
-									const float cs = cosf(dd), sn = sinf(dd);
-									const float nx = x * cs + y * sn, ny = -x * sn + y * cs;
-									x = nx; y = ny;
-								}
-								dir = DmkSectorFromVec(x, y);
-							}
-						}
-						// camera: movimento do rato (mantem-se 120 ms depois do ultimo movimento)
-						const LONG dx = InterlockedExchange(&g_dmkMx, 0), dy = InterlockedExchange(&g_dmkMy, 0);
-						const bool h = (dx >= 2 || dx <= -2), v = (dy >= 2 || dy <= -2);
-						if(h || v)
-						{
-							const bool up = v && dy < 0, down = v && dy > 0, left = h && dx < 0, right = h && dx > 0;
-							if(up && left) camVal = 8; else if(up && right) camVal = 2; else if(down && left) camVal = 6; else if(down && right) camVal = 4;
-							else if(up) camVal = 1; else if(left) camVal = 7; else if(down) camVal = 5; else camVal = 3;
-							camTick = now;
-						}
-						else if(now - camTick > 120) camVal = 0;
-						cam = camVal;
-					}
-				}
-				__except(EXCEPTION_EXECUTE_HANDLER) { dir = 0; cam = 0; }
+				DmkCompute(now, &dir, &cam, &camVal, &camTick);
 			}
 			else if(lastDir <= 0 && lastCam <= 0) { lastDir = lastCam = 0; continue; }	// desligado e ja a zero: nada a fazer
 			g_dmkDir = dir; g_dmkCam = cam;
