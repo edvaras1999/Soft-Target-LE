@@ -32,7 +32,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.15.0 (compatibilidade DMK: variaveis DirecionalCycleMoveset e CameraMovementCMF para animacoes OAR; desligada por omissao)"
+#define PLUGIN_VERSION_STR	"0.15.1 (compatibilidade DMK + camera do lock sem oscilacao: uma correcao por leitura nova da camera)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -1735,7 +1735,10 @@ namespace
 			const bool okC = fn(holder, NULL, g_dmkNameCam, (SInt32)cam);
 			static int logged = 0;
 			static DWORD lastFailLog = 0;
-			if(logged < 40 && (dir != 0 || cam != 0)) { ++logged; _MESSAGE("dmk: direction=%d camera=%d (graph write: direction %s, camera %s)", dir, cam, okD ? "ok" : "failed", okC ? "ok" : "failed"); }
+			static int lastLoggedDir = -1;
+			static int camLogged = 0;
+			if(dir != lastLoggedDir && logged < 200) { ++logged; lastLoggedDir = dir; _MESSAGE("dmk: direction=%d (graph write: direction %s, camera %s)", dir, okD ? "ok" : "failed", okC ? "ok" : "failed"); }
+			else if(cam != 0 && camLogged < 8) { ++camLogged; _MESSAGE("dmk: camera=%d (mouse direction, first %d samples)", cam, camLogged); }
 			if((!okD || !okC) && GetTickCount() - lastFailLog > 30000)
 			{ lastFailLog = GetTickCount(); _MESSAGE("dmk: the graph did not accept the variable (%s%s) - is SoftTarget_BDI.json installed and BDI loaded?", okD ? "" : "DirecionalCycleMoveset ", okC ? "" : "CameraMovementCMF"); }
 		}
@@ -3039,12 +3042,26 @@ namespace
 						{
 							float cy = *(float *)(cs + 0x5C);
 							float wantYaw = g_targetYaw;
+							// v0.15.1: o erro medido pela direcao REAL da camera so muda uma vez por frame; corrigi-lo a cada 1 ms
+							// aplicava a mesma correcao ~16 vezes e a camera oscilava. So se corrige quando ha leitura nova.
+							bool camHold = false;
+							float dtc = dt;
 							{
 								// Erro entre a direcao REAL da camera e o alvo, medido a partir da posicao da camera: compensa
 								// qualquer deslocamento lateral/atras da camera (mods tipo AIM FIX).
 								float o2[3], d2[3];
 								if(CameraRay(player, o2, d2))
-									wantYaw = WrapPi(cy + WrapPi(atan2f(g_aimX - o2[0], g_aimY - o2[1]) - atan2f(d2[0], d2[1])));
+								{
+									static float s_ray0 = 1000.0f; static DWORD s_t0 = 0;
+									const float rayYaw = atan2f(d2[0], d2[1]);
+									if(fabsf(WrapPi(rayYaw - s_ray0)) < 0.00002f && (DWORD)(now - s_t0) < 100) camHold = true;
+									else
+									{
+										dtc = (float)(DWORD)(now - s_t0) * 0.001f; if(dtc < 0.001f) dtc = 0.001f; if(dtc > 0.05f) dtc = 0.05f;
+										s_ray0 = rayYaw; s_t0 = now;
+										wantYaw = WrapPi(cy + 0.5f * WrapPi(atan2f(g_aimX - o2[0], g_aimY - o2[1]) - rayYaw));
+									}
+								}
 							}
 							wantYaw = WrapPi(wantYaw - g_cfg.aimOffX * kPi / 180.0f);		// alvo a direita do centro = camera um pouco mais a esquerda
 							{
@@ -3054,25 +3071,42 @@ namespace
 								if(fabsf(dl) <= dz) wantYaw = cy;
 								else wantYaw = WrapPi(cy + dl - (dl > 0.0f ? dz : -dz));
 							}
-							cy = WrapPi(cy + StepToward(cy, wantYaw, true, dt, camMax, camSmooth));
-							*(float *)(cs + 0x5C) = cy;
-							*(float *)(cs + 0x60) = cy;
+							if(!camHold)
+							{
+								cy = WrapPi(cy + StepToward(cy, wantYaw, true, dtc, camMax, camSmooth));
+								*(float *)(cs + 0x5C) = cy;
+								*(float *)(cs + 0x60) = cy;
+							}
 						}
 						else
 						{
 							float * off = (float *)(cs + 0xAC);
 							float want = WrapPi(g_targetYaw - rot.z);
+							bool offHold = false;
+							float dto = dt;
 							if(viewCtl)
 							{
 								// vista presa ao alvo: o deslocamento corrige o erro REAL da direcao da camera (nao depende da convencao do angulo)
+								// v0.15.1: uma correcao por leitura nova da camera (antes ~16 por frame, e a camera oscilava).
+								want = *off;
 								float o3[3], d3[3];
 								if(CameraRay(player, o3, d3))
-									want = WrapPi(*off + WrapPi(atan2f(g_aimX - o3[0], g_aimY - o3[1]) - atan2f(d3[0], d3[1])));
+								{
+									static float s_ray1 = 1000.0f; static DWORD s_t1 = 0;
+									const float rayYaw = atan2f(d3[0], d3[1]);
+									if(fabsf(WrapPi(rayYaw - s_ray1)) < 0.00002f && (DWORD)(now - s_t1) < 100) offHold = true;
+									else
+									{
+										dto = (float)(DWORD)(now - s_t1) * 0.001f; if(dto < 0.001f) dto = 0.001f; if(dto > 0.05f) dto = 0.05f;
+										s_ray1 = rayYaw; s_t1 = now;
+										want = WrapPi(*off + 0.5f * WrapPi(atan2f(g_aimX - o3[0], g_aimY - o3[1]) - rayYaw));
+									}
+								}
 								const float dl3 = WrapPi(want - *off);
 								if(fabsf(dl3) <= softDz) want = *off;
 								else want = WrapPi(*off + dl3 - (dl3 > 0.0f ? softDz : -softDz));
 							}
-							*off = WrapPi(*off + StepToward(*off, want, true, dt, camMax, camSmooth));
+							if(!offHold) *off = WrapPi(*off + StepToward(*off, want, true, dto, camMax, camSmooth));
 						}
 
 						float o[3], dd[3];
