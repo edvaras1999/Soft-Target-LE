@@ -21,6 +21,7 @@
 #include "skse/PapyrusNativeFunctions.h"
 #include "skse/Hooks_UI.h"
 #include "skse/GameThreads.h"
+#include "skse/GameData.h"
 #include "skse/ScaleformMovie.h"
 #include "skse/ScaleformCallbacks.h"
 #include "Log.h"
@@ -32,7 +33,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.15.1 (compatibilidade DMK + camera do lock sem oscilacao: uma correcao por leitura nova da camera)"
+#define PLUGIN_VERSION_STR	"0.16.0 (compatibilidade DMK + habilidades Keytrace por condicao de variavel; desligadas por omissao)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -161,6 +162,7 @@ namespace
 		float	lockSoftSpeedDeg;	// velocidade maxima do puxao, graus por segundo
 		float	lockSoftDeadZone;	// zona morta, graus
 		// ---- v0.15.0: compatibilidade DMK (variaveis de animacao do jogador para pacotes OAR)
+		int		dmkKeytrace;		// 1 = adiciona uma vez as 4 habilidades do Keytrace.esp (LE) ao jogador (pacotes que usam HasMagicEffect Keytrace)
 		int		dmkCompat;			// 1 = publica DirecionalCycleMoveset (direcao do movimento) e CameraMovementCMF (direcao da camera)
 	};
 	Config g_cfg;
@@ -266,6 +268,7 @@ namespace
 		{ "LockSoftSpeedDegPerSec",	'f', &g_cfg.lockSoftSpeedDeg,	240.0f },
 		{ "LockSoftDeadZoneDegrees",'f', &g_cfg.lockSoftDeadZone,	0.6f },
 		{ "DmkCompat",				'i', &g_cfg.dmkCompat,			0.0f },
+		{ "DmkKeytrace",			'i', &g_cfg.dmkKeytrace,		0.0f },
 	};
 	const int kNumOpts = sizeof(g_opts) / sizeof(g_opts[0]);
 
@@ -402,6 +405,8 @@ namespace
 		if(g_cfg.lockSoftDeadZone > 5.0f)	g_cfg.lockSoftDeadZone = 5.0f;
 		if(g_cfg.dmkCompat < 0)				g_cfg.dmkCompat = 0;
 		if(g_cfg.dmkCompat > 1)				g_cfg.dmkCompat = 1;
+		if(g_cfg.dmkKeytrace < 0)			g_cfg.dmkKeytrace = 0;
+		if(g_cfg.dmkKeytrace > 1)			g_cfg.dmkKeytrace = 1;
 		if(g_cfg.speedScale < 20.0f)		g_cfg.speedScale = 20.0f;
 		if(g_cfg.speedScale > 300.0f)		g_cfg.speedScale = 300.0f;
 		if(g_cfg.aimOffX < -20.0f)			g_cfg.aimOffX = -20.0f;
@@ -1735,6 +1740,7 @@ namespace
 			const bool okC = fn(holder, NULL, g_dmkNameCam, (SInt32)cam);
 			static int logged = 0;
 			static DWORD lastFailLog = 0;
+			if(okD && okC) g_ktGraphOk = 1;
 			static int lastLoggedDir = -1;
 			static int camLogged = 0;
 			if(dir != lastLoggedDir && logged < 200) { ++logged; lastLoggedDir = dir; _MESSAGE("dmk: direction=%d (graph write: direction %s, camera %s)", dir, okD ? "ok" : "failed", okC ? "ok" : "failed"); }
@@ -1758,6 +1764,69 @@ namespace
 	private:
 		int m_d, m_c;
 	};
+
+
+	// ------------------------------------------------------------------ Keytrace (v0.16.0)
+	// Pacotes DAR/OAR feitos para o DtryKeyUtil testam HasMagicEffect("Keytrace.esp"|0x801..0x804).
+	// O Keytrace.esp do SoftTarget traz 4 habilidades (0x806..0x809) cujos efeitos tem a condicao
+	// GetGraphVariableInt("DirecionalCycleMoveset") == N: o motor liga e desliga cada efeito sozinho com a direcao
+	// que o SoftTarget publica. Aqui so se adicionam as habilidades ao jogador (uma vez), com a rotina interna do jogo.
+	typedef bool (__fastcall * KtAddSpellFn)(void * actor, void * edxUnused, SpellItem * spell);
+	const UInt32	kKtAddSpellAddr	= 0x006EC120;
+	volatile LONG	g_ktState		= 0;		// 0 por fazer, 1 feito, 2 desistiu (ver o log)
+	volatile LONG	g_ktGraphOk		= 0;		// o grafo do jogador ja aceitou as variaveis
+
+	bool KtSigOk()
+	{
+		static const UInt8 kSig[] = { 0x83,0xEC,0x14, 0x53,0x56,0x57, 0x8B,0x7C,0x24,0x24, 0x32,0xDB, 0x8B,0xF1, 0x85,0xFF, 0x0F,0x84,0x40,0x01,0x00,0x00, 0x8B,0xCF };
+		bool ok = false;
+		__try { ok = memcmp((const void *)kKtAddSpellAddr, kSig, sizeof(kSig)) == 0; }
+		__except(EXCEPTION_EXECUTE_HANDLER) { ok = false; }
+		return ok;
+	}
+
+	bool KtCallAdd(PlayerCharacter * player, SpellItem * spell)
+	{
+		bool r = false;
+		__try { KtAddSpellFn fn = (KtAddSpellFn)kKtAddSpellAddr; r = fn(player, NULL, spell); }
+		__except(EXCEPTION_EXECUTE_HANDLER) { ++g_dmkFaults; _MESSAGE("keytrace: fault while adding the ability - disabled"); g_ktState = 2; }
+		return r;
+	}
+
+	// Corre na thread do jogo.
+	void KtEnsureNow()
+	{
+		if(g_ktState != 0) return;
+		if(!KtSigOk()) { g_ktState = 2; _MESSAGE("keytrace: engine routine AddSpell NOT recognised - Keytrace compatibility stays OFF"); return; }
+		DataHandler * dh = DataHandler::GetSingleton();
+		PlayerCharacter * player = Engine::Player();
+		if(!dh || !player) return;
+		const ModInfo * mi = dh->LookupModByName("Keytrace.esp");
+		if(!mi || mi->modIndex == 0xFF) { g_ktState = 2; _MESSAGE("keytrace: Keytrace.esp (the SoftTarget LE version) is not loaded - Keytrace compatibility stays OFF"); return; }
+		int added = 0;
+		for(int i = 0; i < 4; ++i)
+		{
+			const UInt32 id = ((UInt32)mi->modIndex << 24) | (UInt32)(0x806 + i);
+			TESForm * f = LookupFormByID(id);
+			SpellItem * sp = f ? DYNAMIC_CAST(f, TESForm, SpellItem) : NULL;
+			if(!sp) { g_ktState = 2; _MESSAGE("keytrace: ability %08X not found in Keytrace.esp - Keytrace compatibility stays OFF", (unsigned)id); return; }
+			const bool r = KtCallAdd(player, sp);
+			if(g_ktState == 2) return;
+			_MESSAGE("keytrace: ability %08X %s", (unsigned)id, r ? "added" : "already there (or refused by the game)");
+			if(r) ++added;
+		}
+		g_ktState = 1;
+		_MESSAGE("keytrace: done (%d new abilities). The direction effects now follow DirecionalCycleMoveset.", added);
+	}
+
+	class KtTask : public TaskDelegate
+	{
+	public:
+		virtual void Run(void) { KtEnsureNow(); g_ktPendingFlag = 0; }
+		virtual void Dispose(void) { delete this; }
+		static volatile LONG g_ktPendingFlag;
+	};
+	volatile LONG KtTask::g_ktPendingFlag = 0;
 
 	inline int DmkSectorFromVec(float x, float y)	// x = direita, y = frente
 	{
@@ -1819,7 +1888,7 @@ namespace
 	DWORD WINAPI DmkThread(LPVOID)
 	{
 		int lastDir = -1, lastCam = -1;
-		DWORD lastWrite = 0, camTick = 0;
+		DWORD lastWrite = 0, camTick = 0, lastKt = 0;
 		int camVal = 0;
 		for(;;)
 		{
@@ -1831,6 +1900,8 @@ namespace
 				DmkCompute(now, &dir, &cam, &camVal, &camTick);
 			}
 			else if(lastDir <= 0 && lastCam <= 0) { lastDir = lastCam = 0; continue; }	// desligado e ja a zero: nada a fazer
+			if(g_cfg.dmkKeytrace && g_cfg.dmkCompat && g_ktState == 0 && g_ktGraphOk && !KtTask::g_ktPendingFlag && g_taskIface && (now - lastKt) > 3000)
+			{ lastKt = now; KtTask::g_ktPendingFlag = 1; g_taskIface->AddTask(new KtTask()); }
 			g_dmkDir = dir; g_dmkCam = cam;
 			const bool changed = (dir != lastDir || cam != lastCam);
 			if(!changed && now - lastWrite < 500) continue;		// refresca de meio em meio segundo (o grafo reinicia ao mudar de area)
