@@ -132,6 +132,7 @@
     <ClCompile Include="..\..\skse\skse\GameReferences.cpp" />
     <ClCompile Include="..\..\skse\skse\GameBSExtraData.cpp" />
     <ClCompile Include="..\..\skse\skse\GameExtraData.cpp" />
+    <ClCompile Include="..\..\skse\skse\GameFormComponents.cpp" />
     <ClCompile Include="SoftTargetLE.cpp" />
     <None Include="exports.def" />
   </ItemGroup>
