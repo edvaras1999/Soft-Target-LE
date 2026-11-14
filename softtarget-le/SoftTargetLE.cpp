@@ -41,6 +41,10 @@
 static PluginHandle				g_pluginHandle	= kPluginHandle_Invalid;
 static SKSEMessagingInterface *	g_messaging		= NULL;
 static SKSEPapyrusInterface *	g_papyrus		= NULL;
+// GameData.cpp (SKSE) pede este simbolo, que normalmente vem de GameReferences.cpp; nao o usamos. O valor invalido do jogo e 0.
+static const UInt32 g_invalidRefHandleValue = 0;
+extern const UInt32 * const g_invalidRefHandle;
+const UInt32 * const g_invalidRefHandle = &g_invalidRefHandleValue;
 static SKSETaskInterface *		g_taskIface		= NULL;
 
 // O SKSE declara LookupREFRByHandle mas so a define em GameReferences.cpp, que nao compilamos.
