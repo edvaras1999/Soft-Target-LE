@@ -41,18 +41,9 @@
 static PluginHandle				g_pluginHandle	= kPluginHandle_Invalid;
 static SKSEMessagingInterface *	g_messaging		= NULL;
 static SKSEPapyrusInterface *	g_papyrus		= NULL;
-// GameData.cpp (SKSE) pede este simbolo, que normalmente vem de GameReferences.cpp; nao o usamos. O valor invalido do jogo e 0.
-static const UInt32 g_invalidRefHandleValue = 0;
-const UInt32 * g_stIRH = &g_invalidRefHandleValue;
-#pragma comment(linker, "/include:?g_stIRH@@3PBKA")
-#pragma comment(linker, "/alternatename:?g_invalidRefHandle@@3PBKB=?g_stIRH@@3PBKA")
 static SKSETaskInterface *		g_taskIface		= NULL;
 
-// O SKSE declara LookupREFRByHandle mas so a define em GameReferences.cpp, que nao compilamos.
-// Definimos aqui com o endereco da LE 1.9.32.0 (confirmado no FreeClimb LE).
-const _LookupREFRByHandle LookupREFRByHandle = (_LookupREFRByHandle)0x004A9180;
-// Cria o "handle" de uma referencia (visto na LockOn.dll; assinatura do SKSE: saida, referencia).
-const _CreateRefHandleByREFR CreateRefHandleByREFR = (_CreateRefHandleByREFR)0x0065CC00;
+// LookupREFRByHandle e CreateRefHandleByREFR vem agora do GameReferences.cpp do SKSE (compilado no projeto).
 
 namespace
 {
