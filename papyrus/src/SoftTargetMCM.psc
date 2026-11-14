@@ -19,7 +19,7 @@ int ocount
 int lang		; 0 = English, 1 = Portugues
 
 int Function GetVersion()
-	return 19
+	return 20
 EndFunction
 
 Function InitTables()
@@ -419,6 +419,7 @@ Function PageCamera()
 	AddHeaderOption(T("Animation mods (DMK compatibility)", "Mods de animação (compatibilidade DMK)"))
 	AddEmptyOption()
 	AddToggleRow("DmkCompat", T("Publish DMK animation variables", "Publicar as variáveis de animação do DMK"), 0.0, T("For animation packs made for Directional Movement Keys (OAR conditions on DirecionalCycleMoveset and CameraMovementCMF). Publishes the movement direction (relative to the body, so it follows the FreeCam profile) and the camera direction. Needs SoftTarget_BDI.json in SKSE/Plugins/BehaviorDataInjector. Off by default. Do not use together with another DMK.", "Para pacotes de animação feitos para o Directional Movement Keys (condições OAR em DirecionalCycleMoveset e CameraMovementCMF). Publica a direção do movimento (relativa ao corpo, por isso acompanha o perfil FreeCam) e a direção da câmera. Precisa do SoftTarget_BDI.json em SKSE/Plugins/BehaviorDataInjector. Desligado por padrão. Não use junto com outro DMK."))
+	AddToggleRow("DmkKeytrace", T("Keytrace abilities (DtryKeyUtil packs)", "Habilidades Keytrace (pacotes DtryKeyUtil)"), 0.0, T("For animation packs that test HasMagicEffect on Keytrace.esp. Needs the SoftTarget Keytrace.esp (LE version) active and the option above on. Adds 4 permanent abilities to the player once. Experimental, off by default.", "Para pacotes que testam HasMagicEffect do Keytrace.esp. Precisa do Keytrace.esp do SoftTarget (versão LE) ativo e da opção acima ligada. Adiciona 4 habilidades permanentes ao jogador, uma vez. Experimental, desligado por padrão."))
 EndFunction
 
 Function PageLock()
