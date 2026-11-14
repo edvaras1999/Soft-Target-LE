@@ -127,6 +127,8 @@
     <ClCompile Include="..\..\skse\skse\HashUtil.cpp" />
     <ClCompile Include="..\..\skse\skse\Utilities.cpp" />
     <ClCompile Include="..\..\skse\skse\GameRTTI.cpp" />
+    <ClCompile Include="..\..\skse\skse\GameForms.cpp" />
+    <ClCompile Include="..\..\skse\skse\GameData.cpp" />
     <ClCompile Include="SoftTargetLE.cpp" />
     <None Include="exports.def" />
   </ItemGroup>
