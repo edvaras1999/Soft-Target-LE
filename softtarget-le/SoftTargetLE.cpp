@@ -1695,6 +1695,8 @@ namespace
 	const UInt32	kDmkInnerAddr	= 0x00650960;
 	volatile LONG	g_dmkReady		= 0;		// 1 = rotina confirmada
 	volatile LONG	g_dmkFaults		= 0;
+	volatile LONG	g_ktState		= 0;		// 0 por fazer, 1 feito, 2 desistiu (ver o log)
+	volatile LONG	g_ktGraphOk		= 0;		// o grafo do jogador ja aceitou as variaveis
 	volatile LONG	g_dmkMx			= 0;		// deslocamento acumulado do rato (para CameraMovementCMF)
 	volatile LONG	g_dmkMy			= 0;
 	volatile LONG	g_dmkDir		= 0;		// ultimo valor calculado
@@ -1773,8 +1775,6 @@ namespace
 	// que o SoftTarget publica. Aqui so se adicionam as habilidades ao jogador (uma vez), com a rotina interna do jogo.
 	typedef bool (__fastcall * KtAddSpellFn)(void * actor, void * edxUnused, SpellItem * spell);
 	const UInt32	kKtAddSpellAddr	= 0x006EC120;
-	volatile LONG	g_ktState		= 0;		// 0 por fazer, 1 feito, 2 desistiu (ver o log)
-	volatile LONG	g_ktGraphOk		= 0;		// o grafo do jogador ja aceitou as variaveis
 
 	bool KtSigOk()
 	{
