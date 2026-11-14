@@ -45,6 +45,7 @@ static SKSEPapyrusInterface *	g_papyrus		= NULL;
 static const UInt32 g_invalidRefHandleValue = 0;
 extern const UInt32 * const g_stInvalidRefHandle;
 const UInt32 * const g_stInvalidRefHandle = &g_invalidRefHandleValue;
+#pragma comment(linker, "/include:?g_stInvalidRefHandle@@3PBKB")
 #pragma comment(linker, "/alternatename:?g_invalidRefHandle@@3PBKB=?g_stInvalidRefHandle@@3PBKB")
 static SKSETaskInterface *		g_taskIface		= NULL;
 
