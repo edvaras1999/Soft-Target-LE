@@ -33,7 +33,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.16.2 (so age com jogo carregado e sem menus; desligar total pelo MCM; repouso leve; arco em 3a pessoa corrige pelo erro real; primeira pessoa suave)"
+#define PLUGIN_VERSION_STR	"0.16.3 (arco em 3a pessoa: vista presa suave com guarda contra luta da camera; primeira pessoa suave; so age com jogo carregado e sem menus)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -1265,6 +1265,9 @@ namespace
 
 	// v0.16.2: o mod so age com um jogo carregado (save ou jogo novo) e nunca mexe na camera/corpo com um menu aberto.
 	volatile LONG	g_gameLive = 0;
+	DWORD			g_perfLast = 0;
+	DWORD			g_camGuardUntil = 0;
+	int				g_camChkN = 0;
 	volatile DWORD	g_liveTick = 0;
 	bool MenuBlockedCached()
 	{
@@ -2836,11 +2839,11 @@ namespace
 			if(!g_cfg.enabled || !g_gameLive || (now - g_liveTick) < 1500)
 			{
 				if(g_lockOwn) LockOff(g_cfg.enabled ? "game not ready" : "mod turned off");
-				g_active = 0; g_fastHold = 0; g_mvWant = 0; phase = 0;
+				g_active = 0; g_fastHold = 0; g_mvWant = 0; phase = 0; g_perfLast = 0;
 				Sleep(50);
 				continue;
 			}
-			if(MenuBlockedCached()) { g_fastHold = 0; g_mvWant = 0; continue; }
+			if(MenuBlockedCached()) { g_fastHold = 0; g_mvWant = 0; g_perfLast = 0; continue; }
 
 			// A sessao acaba quando passa o tempo sem novos botoes (o lock-on proprio nao tem tempo limite).
 			if(g_active && !g_lockOwn && (LONG)(now - g_endTick) >= 0) { g_endReason = 0; g_active = 0; }
@@ -3038,9 +3041,9 @@ namespace
 			// Camera ao ombro com o arco (os dois perfis).
 			{
 				// v0.16.1 diagnostico: a thread parou? (lags) e quanto o ponto de mira esta longe do centro do ecra (arco / primeira pessoa).
-				static DWORD s_lastLoop = 0, s_lastCtr = 0; static int s_stallLogs = 0, s_ctrLogs = 0;
-				if(s_lastLoop && (now - s_lastLoop) > 60 && s_stallLogs < 40) { ++s_stallLogs; _MESSAGE("perf: SoftTarget thread stalled %lu ms", (unsigned long)(now - s_lastLoop)); }
-				s_lastLoop = now;
+				static DWORD s_lastCtr = 0; static int s_stallLogs = 0, s_ctrLogs = 0;
+				if(g_perfLast && (now - g_perfLast) > 150 && s_stallLogs < 40) { ++s_stallLogs; _MESSAGE("perf: SoftTarget thread stalled %lu ms", (unsigned long)(now - g_perfLast)); }
+				g_perfLast = now;
 				if(g_lockOwn && (softFP || bowDrawing) && (now - s_lastCtr) > 500 && s_ctrLogs < 400)
 				{
 					s_lastCtr = now; ++s_ctrLogs;
@@ -3168,9 +3171,12 @@ namespace
 				if(g_lockOwn && ((g_cfg.lockCameraFollow && !coeusProfile) || bowLockCam || viewCtl))
 				{
 					// Com o arco puxado (FreeCam) a camera centra o alvo a partir da posicao REAL da camera, mais depressa e sem zona morta.
-					const float camSmooth = viewCtl ? softSm : ((bowLockCam && g_cfg.lockCameraSmooth < 14.0f) ? 14.0f : g_cfg.lockCameraSmooth);
+					// v0.16.3: com o arco (puxado, ou equipado no modo de vista presa) a correcao e sempre suave, nunca o salto do Hard.
+					const bool gentle = bowLockCam || (viewCtl && softBow);
+					const float gainC = gentle ? 0.8f : 0.5f;
+					const float camSmooth = gentle ? (g_cfg.lockCameraSmooth > 14.0f ? g_cfg.lockCameraSmooth : 14.0f) : (viewCtl ? softSm : g_cfg.lockCameraSmooth);
 					const float dzRad = viewCtl ? softDz : (bowLockCam ? 0.0f : g_cfg.camDeadZoneDeg * kPi / 180.0f);
-					const float camMax = viewCtl ? softMax : maxRad;
+					const float camMax = gentle ? maxRad : (viewCtl ? softMax : maxRad);
 					UInt8 * cs = ThirdPersonStatePtr();
 					if(cs)
 					{
@@ -3196,7 +3202,7 @@ namespace
 										dtc = (float)(DWORD)(now - s_t0) * 0.001f; if(dtc < 0.001f) dtc = 0.001f; if(dtc > 0.05f) dtc = 0.05f;
 										s_ray0 = rayYaw; s_t0 = now;
 										g_ctrErrYaw = WrapPi(atan2f(g_aimX - o2[0], g_aimY - o2[1]) - rayYaw);
-										wantYaw = WrapPi(cy + 0.5f * WrapPi(atan2f(g_aimX - o2[0], g_aimY - o2[1]) - rayYaw));
+										wantYaw = WrapPi(cy + gainC * WrapPi(atan2f(g_aimX - o2[0], g_aimY - o2[1]) - rayYaw));
 									}
 								}
 							}
@@ -3240,18 +3246,38 @@ namespace
 										dto = (float)(DWORD)(now - s_t1) * 0.001f; if(dto < 0.001f) dto = 0.001f; if(dto > 0.05f) dto = 0.05f;
 										s_ray1 = rayYaw; s_t1 = now;
 										g_ctrErrYaw = WrapPi(atan2f(g_aimX - o3[0], g_aimY - o3[1]) - rayYaw);
-										want = WrapPi(*off + 0.5f * g_ctrErrYaw);
+										want = WrapPi(*off + gainC * g_ctrErrYaw);
+										if(gentle)
+										{
+											// guarda: se o erro CRESCE leitura apos leitura apesar de corrigirmos, algo luta connosco: pausa curta.
+											static float s_prevE = 0.0f; static int s_grow = 0; static int s_gl = 0;
+											const float e = fabsf(g_ctrErrYaw);
+											if(e > s_prevE + 0.017f && e > 0.05f) ++s_grow; else s_grow = 0;
+											s_prevE = e;
+											if(s_grow >= 4) { s_grow = 0; g_camGuardUntil = now + 400; if(s_gl < 20) { ++s_gl; _MESSAGE("camguard: yaw error keeps growing (%.1f deg) - camera correction paused 400 ms", e * 57.2958f); } }
+										}
 									}
 								}
-								const float dl3 = WrapPi(want - *off);
+								if(gentle)
+								{
+									// o corpo gira ao puxar o arco (e o Coeus/TDM compensa): deixa-se assentar ~200 ms antes de corrigir
+									static bool s_prevDraw = false; static DWORD s_drawT = 0;
+									if(bowDrawing && !s_prevDraw) { s_drawT = now; g_camChkN = 0; }
+									s_prevDraw = bowDrawing;
+									if(bowDrawing && (DWORD)(now - s_drawT) < 200) offHold = true;
+									if((LONG)(now - g_camGuardUntil) < 0) offHold = true;
+								}
+								float dl3 = WrapPi(want - *off);
+								if(dl3 >  0.35f) dl3 =  0.35f;		// no maximo ~20 graus por correcao
+								if(dl3 < -0.35f) dl3 = -0.35f;
 								if(fabsf(dl3) <= dzO) want = *off;
 								else want = WrapPi(*off + dl3 - (dl3 > 0.0f ? dzO : -dzO));
 							}
 							{
 								// diagnostico: alguem mais mexe neste valor entre duas das nossas escritas? (so com o arco puxado)
-								static float s_wr = 1000.0f; static int s_nChk = 0;
-								if(bowLockCam && s_wr < 999.0f && fabsf(WrapPi(*off - s_wr)) > 0.004f && s_nChk < 40)
-								{ ++s_nChk; _MESSAGE("camcheck: we wrote %.4f, now reads %.4f (changed by the mouse or another mod)", s_wr, *off); }
+								static float s_wr = 1000.0f; static int s_nTot = 0;
+								if(bowLockCam && s_wr < 999.0f && fabsf(WrapPi(*off - s_wr)) > 0.004f && g_camChkN < 6 && s_nTot < 150)
+								{ ++g_camChkN; ++s_nTot; _MESSAGE("camcheck: we wrote %.4f, now reads %.4f (changed by the mouse or another mod)", s_wr, *off); }
 								if(!offHold) *off = WrapPi(*off + StepToward(*off, want, true, dto, camMax, camSmooth));
 								s_wr = bowLockCam ? *off : 1000.0f;
 							}
@@ -3265,7 +3291,7 @@ namespace
 							// v0.16.1: com o arco puxado a inclinacao e corrigida pelo erro REAL (ponto de mira vs centro do ecra), uma vez por leitura.
 							float want = -atan2f(g_aimZ - o[2], sqrtf(hx * hx + hy * hy) > 1.0f ? sqrtf(hx * hx + hy * hy) : 1.0f);
 							bool bpHold = false; float dtb = dt;
-							if(bowLockCam)
+							if(gentle)
 							{
 								static float s_rb = 1000.0f; static DWORD s_tb = 0;
 								const float hr = sqrtf(dd[0] * dd[0] + dd[1] * dd[1]);
@@ -3277,13 +3303,14 @@ namespace
 								{
 									dtb = (float)(DWORD)(now - s_tb) * 0.001f; if(dtb < 0.001f) dtb = 0.001f; if(dtb > 0.05f) dtb = 0.05f;
 									s_rb = rayUp; s_tb = now;
-									want = cp - 0.5f * (aimUp - rayUp);
+									want = cp - gainC * (aimUp - rayUp);
 								}
 							}
 							else want += g_cfg.aimOffY * kPi / 180.0f;		// alvo acima do centro = camera um pouco mais para baixo
 							if(want >  1.1f) want =  1.1f;
 							if(want < -1.1f) want = -1.1f;
 							if(bpHold) want = cp;
+							if(gentle && (LONG)(now - g_camGuardUntil) < 0) want = cp;
 							{
 								const float dzp = dzRad;
 								const float dp = want - cp;
