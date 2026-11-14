@@ -44,7 +44,7 @@ static SKSEPapyrusInterface *	g_papyrus		= NULL;
 // GameData.cpp (SKSE) pede este simbolo, que normalmente vem de GameReferences.cpp; nao o usamos. O valor invalido do jogo e 0.
 static const UInt32 g_invalidRefHandleValue = 0;
 extern const UInt32 * const g_stInvalidRefHandle;
-const UInt32 * const g_stInvalidRefHandle = &g_invalidRefHandleValue;
+__declspec(selectany) extern const UInt32 * const g_stInvalidRefHandle = &g_invalidRefHandleValue;
 #pragma comment(linker, "/include:?g_stInvalidRefHandle@@3PBKB")
 #pragma comment(linker, "/alternatename:?g_invalidRefHandle@@3PBKB=?g_stInvalidRefHandle@@3PBKB")
 static SKSETaskInterface *		g_taskIface		= NULL;
