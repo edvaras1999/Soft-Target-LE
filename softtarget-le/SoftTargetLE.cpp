@@ -33,7 +33,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.16.1 (lock fundido com o centro do ecra no arco e primeira pessoa; DMK com atraso ao largar; logs de diagnostico)"
+#define PLUGIN_VERSION_STR	"0.16.2 (so age com jogo carregado e sem menus; desligar total pelo MCM; repouso leve; arco em 3a pessoa corrige pelo erro real; primeira pessoa suave)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -1263,6 +1263,17 @@ namespace
 		return false;
 	}
 
+	// v0.16.2: o mod so age com um jogo carregado (save ou jogo novo) e nunca mexe na camera/corpo com um menu aberto.
+	volatile LONG	g_gameLive = 0;
+	volatile DWORD	g_liveTick = 0;
+	bool MenuBlockedCached()
+	{
+		static DWORD t = 0; static bool v = false;
+		const DWORD n = GetTickCount();
+		if(n - t >= 100) { t = n; v = MenuBlocksInput(); }
+		return v;
+	}
+
 	// Tecla F (liga/desliga) - chamada pelo recetor de teclas.
 	void LockToggle()
 	{
@@ -1662,7 +1673,7 @@ namespace
 	{
 		for(;;)
 		{
-			Sleep(1);
+			Sleep((g_mvLearnState || g_mvWant) ? 1 : 10);
 			if(g_mvLearnState == 1 || g_mvLearnState == 2) { MvLearn(GetTickCount()); continue; }
 			if(!g_mvFound || !g_mvWant || GetTickCount() - g_mvWantTick > 120) { g_mvHaveLast = 0; continue; }
 			__try
@@ -1888,10 +1899,10 @@ namespace
 		int camVal = 0;
 		for(;;)
 		{
-			Sleep(8);
+			Sleep(g_cfg.dmkCompat ? 8 : 100);
 			const DWORD now = GetTickCount();
 			int dir = 0, cam = 0;
-			if(g_cfg.dmkCompat && g_dmkReady && g_taskIface)
+			if(g_cfg.dmkCompat && g_cfg.enabled && g_gameLive && g_dmkReady && g_taskIface)
 			{
 				DmkCompute(now, &dir, &cam, &camVal, &camTick);
 			}
@@ -1937,7 +1948,7 @@ namespace
 	{
 		for(;;)
 		{
-			Sleep(1);
+			Sleep(g_fastHold ? 1 : 10);
 			if(!g_fastHold || GetTickCount() - g_fastHoldTick > 120) continue;
 			__try
 			{
@@ -2160,7 +2171,7 @@ namespace
 				ax = px; ay = py;
 				az = pz + (bow ? 0.5f * g_cfg.projectileGravity * t * t : 0.0f);
 				static DWORD lastPredLog = 0;
-				if(now - lastPredLog > 400)
+				if(g_cfg.verbose && now - lastPredLog > 400)
 				{
 					lastPredLog = now;
 					_MESSAGE("predict: %s dist %.0f speed %.0f flight %.2fs | target speed %.0f u/s | lead (%.0f, %.0f, %.0f) drop +%.0f",
@@ -2815,11 +2826,21 @@ namespace
 
 		for(;;)
 		{
-			Sleep((DWORD)g_cfg.updateMs);
+			Sleep((g_active || g_lockOwn || g_fastHold) ? (DWORD)g_cfg.updateMs : 12);
 			const DWORD now = GetTickCount();
 			float dt = (now - last) / 1000.0f;
 			last = now;
 			if(dt > 0.1f) dt = 0.1f;
+
+			// v0.16.2: mod desligado no MCM, jogo ainda a carregar ou menu aberto: nao se mexe em nada.
+			if(!g_cfg.enabled || !g_gameLive || (now - g_liveTick) < 1500)
+			{
+				if(g_lockOwn) LockOff(g_cfg.enabled ? "game not ready" : "mod turned off");
+				g_active = 0; g_fastHold = 0; g_mvWant = 0; phase = 0;
+				Sleep(50);
+				continue;
+			}
+			if(MenuBlockedCached()) { g_fastHold = 0; g_mvWant = 0; continue; }
 
 			// A sessao acaba quando passa o tempo sem novos botoes (o lock-on proprio nao tem tempo limite).
 			if(g_active && !g_lockOwn && (LONG)(now - g_endTick) >= 0) { g_endReason = 0; g_active = 0; }
@@ -3064,29 +3085,26 @@ namespace
 					else
 					{
 						// Primeira pessoa: a vista e o corpo. Erro medido pela direcao REAL da vista, zona morta pequena, puxao suave.
-						// v0.16.1: o ponto de mira tem de ficar no CENTRO do ecra. Uma correcao (ganho 0.5) por leitura nova da camera.
-						float wy = g_targetYaw;
+						// v0.16.2: o ponto de mira tem de ficar no CENTRO do ecra. O erro medido pela direcao REAL da vista e aplicado
+						// de forma suave, distribuido pelos frames (nao aos saltos); com a vista presa (Hard) corrige logo, uma vez por leitura.
+						static float s_rf = 1000.0f, s_pendY = 0.0f; static DWORD s_tf = 0;
 						float o2[3], d2[3];
-						bool fpHold = false; float dtf = dt;
 						if(CameraRay(player, o2, d2))
 						{
-							static float s_rf = 1000.0f; static DWORD s_tf = 0;
 							const float rayYaw = atan2f(d2[0], d2[1]);
 							const float errYaw = WrapPi(atan2f(g_aimX - o2[0], g_aimY - o2[1]) - rayYaw);
 							g_ctrErrYaw = errYaw;
-							if(fabsf(WrapPi(rayYaw - s_rf)) < 0.00002f && (DWORD)(now - s_tf) < 100) fpHold = true;
-							else
-							{
-								dtf = (float)(DWORD)(now - s_tf) * 0.001f; if(dtf < 0.001f) dtf = 0.001f; if(dtf > 0.05f) dtf = 0.05f;
-								s_rf = rayYaw; s_tf = now;
-								wy = WrapPi(rot.z + 0.5f * errYaw);
-							}
+							if(fabsf(WrapPi(rayYaw - s_rf)) >= 0.00002f || (DWORD)(now - s_tf) >= 100)
+							{ s_rf = rayYaw; s_tf = now; s_pendY = viewHard ? 0.5f * errYaw : errYaw; }
 						}
-						else wy = rot.z;
-						const float dl = WrapPi(wy - rot.z);
-						if(fabsf(dl) <= softDz) wy = rot.z;
-						else wy = WrapPi(rot.z + dl - (dl > 0.0f ? softDz : -softDz));
-						stepYaw = fpHold ? 0.0f : StepToward(rot.z, wy, true, dtf, softMax, softSm);
+						else s_pendY = 0.0f;
+						{
+							const float eff = fabsf(s_pendY) <= softDz ? 0.0f : s_pendY - (s_pendY > 0.0f ? softDz : -softDz);
+							const float frac = viewHard ? 1.0f : 1.0f - expf(-dt * (softSm > 1.0f ? softSm : 15.0f));
+							float st = eff * frac; const float lim = softMax * dt;
+							if(st > lim) st = lim; if(st < -lim) st = -lim;
+							s_pendY -= st; stepYaw = st;
+						}
 					}
 				}
 				else stepYaw = StepToward(rot.z, g_targetYaw, true, dt, maxRad, g_cfg.smoothing);
@@ -3110,31 +3128,28 @@ namespace
 					if(up < -limitRad) up = -limitRad;
 					if(viewCtl && softFP)
 					{
-						// v0.16.1: inclinacao medida pela direcao REAL da vista (ponto de mira no centro do ecra), uma correcao por leitura.
-						float wp = rot.x;
-						bool pHold = false; float dtp = dt;
+						// v0.16.2: inclinacao medida pela direcao REAL da vista, aplicada de forma suave pelos frames.
+						static float s_rp = 1000.0f, s_pendP = 0.0f; static DWORD s_tp = 0;
 						float o4[3], d4[3];
 						if(CameraRay(player, o4, d4))
 						{
-							static float s_rp = 1000.0f; static DWORD s_tp = 0;
 							const float hr = sqrtf(d4[0] * d4[0] + d4[1] * d4[1]);
 							const float rayUp = atan2f(d4[2], hr > 0.0001f ? hr : 0.0001f);
 							const float hx = g_aimX - o4[0], hy = g_aimY - o4[1];
 							const float aimUp = atan2f(g_aimZ - o4[2], sqrtf(hx * hx + hy * hy) > 1.0f ? sqrtf(hx * hx + hy * hy) : 1.0f);
 							const float errUp = aimUp - rayUp;
 							g_ctrErrPitch = errUp;
-							if(fabsf(rayUp - s_rp) < 0.00002f && (DWORD)(now - s_tp) < 100) pHold = true;
-							else
-							{
-								dtp = (float)(DWORD)(now - s_tp) * 0.001f; if(dtp < 0.001f) dtp = 0.001f; if(dtp > 0.05f) dtp = 0.05f;
-								s_rp = rayUp; s_tp = now;
-								wp = rot.x - 0.5f * errUp;		// positivo = olhar para baixo
-							}
+							if(fabsf(rayUp - s_rp) >= 0.00002f || (DWORD)(now - s_tp) >= 100)
+							{ s_rp = rayUp; s_tp = now; s_pendP = viewHard ? 0.5f * errUp : errUp; }
 						}
-						const float dp = wp - rot.x;
-						if(fabsf(dp) <= softDz) wp = rot.x;
-						else wp = rot.x + dp - (dp > 0.0f ? softDz : -softDz);
-						if(!pHold) rot.x += StepToward(rot.x, wp, false, dtp, softMax, softSm);
+						else s_pendP = 0.0f;
+						{
+							const float eff = fabsf(s_pendP) <= softDz ? 0.0f : s_pendP - (s_pendP > 0.0f ? softDz : -softDz);
+							const float frac = viewHard ? 1.0f : 1.0f - expf(-dt * (softSm > 1.0f ? softSm : 15.0f));
+							float st = eff * frac; const float lim = softMax * dt;
+							if(st > lim) st = lim; if(st < -lim) st = -lim;
+							s_pendP -= st; rot.x -= st;		// positivo = olhar para baixo
+						}
 					}
 					else rot.x += StepToward(rot.x, -up * vSign, false, dt, maxRad, g_cfg.smoothing);	// positivo = olhar para baixo
 					if(!firstPerson) tiltUsed = true;		// em primeira pessoa rot.x e a propria vista: nao se repoe
@@ -3206,7 +3221,10 @@ namespace
 							float want = WrapPi(g_targetYaw - rot.z);
 							bool offHold = false;
 							float dto = dt;
-							if(viewCtl)
+							const float dzO = viewCtl ? softDz : dzRad;
+							// v0.16.2: com o arco puxado o deslocamento tambem corrige o erro REAL (antes, sem o modo de vista, usava o angulo do corpo
+							// ao alvo - a camera esta atras/ao lado do corpo - e por isso nao centrava; Hard centrava, OFF nao).
+							if(viewCtl || bowLockCam)
 							{
 								// vista presa ao alvo: o deslocamento corrige o erro REAL da direcao da camera (nao depende da convencao do angulo)
 								// v0.15.1: uma correcao por leitura nova da camera (antes ~16 por frame, e a camera oscilava).
@@ -3221,14 +3239,22 @@ namespace
 									{
 										dto = (float)(DWORD)(now - s_t1) * 0.001f; if(dto < 0.001f) dto = 0.001f; if(dto > 0.05f) dto = 0.05f;
 										s_ray1 = rayYaw; s_t1 = now;
-										want = WrapPi(*off + 0.5f * WrapPi(atan2f(g_aimX - o3[0], g_aimY - o3[1]) - rayYaw));
+										g_ctrErrYaw = WrapPi(atan2f(g_aimX - o3[0], g_aimY - o3[1]) - rayYaw);
+										want = WrapPi(*off + 0.5f * g_ctrErrYaw);
 									}
 								}
 								const float dl3 = WrapPi(want - *off);
-								if(fabsf(dl3) <= softDz) want = *off;
-								else want = WrapPi(*off + dl3 - (dl3 > 0.0f ? softDz : -softDz));
+								if(fabsf(dl3) <= dzO) want = *off;
+								else want = WrapPi(*off + dl3 - (dl3 > 0.0f ? dzO : -dzO));
 							}
-							if(!offHold) *off = WrapPi(*off + StepToward(*off, want, true, dto, camMax, camSmooth));
+							{
+								// diagnostico: alguem mais mexe neste valor entre duas das nossas escritas? (so com o arco puxado)
+								static float s_wr = 1000.0f; static int s_nChk = 0;
+								if(bowLockCam && s_wr < 999.0f && fabsf(WrapPi(*off - s_wr)) > 0.004f && s_nChk < 40)
+								{ ++s_nChk; _MESSAGE("camcheck: we wrote %.4f, now reads %.4f (changed by the mouse or another mod)", s_wr, *off); }
+								if(!offHold) *off = WrapPi(*off + StepToward(*off, want, true, dto, camMax, camSmooth));
+								s_wr = bowLockCam ? *off : 1000.0f;
+							}
 						}
 
 						float o[3], dd[3];
@@ -3476,9 +3502,9 @@ namespace
 		{
 			InputStringHolder * strings = Engine::UserEvents();
 			if(!events || !*events || !strings) return kEvent_Continue;
-			if(!g_cfg.enabled) return kEvent_Continue;
-
 			MaybeReloadConfig();
+			if(!g_cfg.enabled || !g_gameLive) return kEvent_Continue;
+
 			if(g_cfg.probe) ProbeTick();
 
 			// Estado do lock-on (real, pela LockOn.dll, ou estimado pela tecla).
@@ -3634,6 +3660,18 @@ namespace
 				ResolveIniPath();
 				LoadConfig();
 				ResolveExternal();
+				break;
+
+			case SKSEMessagingInterface::kMessage_PreLoadGame:
+				g_gameLive = 0;
+				if(g_lockOwn) LockOff("loading a game");
+				break;
+
+			case SKSEMessagingInterface::kMessage_PostLoadGame:
+			case SKSEMessagingInterface::kMessage_NewGame:
+				g_liveTick = GetTickCount();
+				g_gameLive = 1;
+				_MESSAGE("game loaded - the mod is now active");
 				break;
 
 			case SKSEMessagingInterface::kMessage_InputLoaded:
