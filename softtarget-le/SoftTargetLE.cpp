@@ -33,7 +33,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.16.0 (compatibilidade DMK + habilidades Keytrace por condicao de variavel; desligadas por omissao)"
+#define PLUGIN_VERSION_STR	"0.16.1 (lock fundido com o centro do ecra no arco e primeira pessoa; DMK com atraso ao largar; logs de diagnostico)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -1896,6 +1896,13 @@ namespace
 				DmkCompute(now, &dir, &cam, &camVal, &camTick);
 			}
 			else if(lastDir <= 0 && lastCam <= 0) { lastDir = lastCam = 0; continue; }	// desligado e ja a zero: nada a fazer
+			{
+				// v0.16.1: largar a direcao so depois de 90 ms sem ela (evita 1,0,1,0 ao andar e escritas desnecessarias no grafo).
+				static int s_hDir = 0; static DWORD s_hTick = 0;
+				if(dir != 0) { s_hDir = dir; s_hTick = now; }
+				else if(s_hDir != 0 && (now - s_hTick) < 90) dir = s_hDir;
+				else s_hDir = 0;
+			}
 			if(g_cfg.dmkKeytrace && g_cfg.dmkCompat && g_ktState == 0 && g_ktGraphOk && !KtTask::g_ktPendingFlag && g_taskIface && (now - lastKt) > 3000)
 			{ lastKt = now; KtTask::g_ktPendingFlag = 1; g_taskIface->AddTask(new KtTask()); }
 			g_dmkDir = dir; g_dmkCam = cam;
@@ -1919,6 +1926,7 @@ namespace
 	// Esta thread repoe o corpo no alvo logo (sem limite de velocidade) e, com camera livre, compensa o deslocamento da camera
 	// para ela nao mexer.
 	volatile LONG	g_fastHold = 0;
+	float			g_ctrErrYaw = 0.0f, g_ctrErrPitch = 0.0f;	// erro (rad) entre o ponto de mira e o centro do ecra, so para o log
 	volatile DWORD	g_mouseTick = 0;		// ultimo movimento do rato (para o lock suave ceder)
 	volatile LONG	g_freeLookHeld = 0;		// tecla de olhar livremente premida
 	volatile DWORD	g_freeLookTick = 0;		// ultima vez que esteve premida
@@ -3007,6 +3015,17 @@ namespace
 			g_mvWant = (remapOn && !(viewCtl && (softFP || bowDrawing)) && g_active && !suppress && g_moveHeld) ? 1 : 0;
 			g_mvWantTick = now;
 			// Camera ao ombro com o arco (os dois perfis).
+			{
+				// v0.16.1 diagnostico: a thread parou? (lags) e quanto o ponto de mira esta longe do centro do ecra (arco / primeira pessoa).
+				static DWORD s_lastLoop = 0, s_lastCtr = 0; static int s_stallLogs = 0, s_ctrLogs = 0;
+				if(s_lastLoop && (now - s_lastLoop) > 60 && s_stallLogs < 40) { ++s_stallLogs; _MESSAGE("perf: SoftTarget thread stalled %lu ms", (unsigned long)(now - s_lastLoop)); }
+				s_lastLoop = now;
+				if(g_lockOwn && (softFP || bowDrawing) && (now - s_lastCtr) > 500 && s_ctrLogs < 400)
+				{
+					s_lastCtr = now; ++s_ctrLogs;
+					_MESSAGE("center: %s | aim point vs screen centre: yaw %.2f deg, pitch %.2f deg", softFP ? "first person" : "bow", g_ctrErrYaw * 57.2958f, g_ctrErrPitch * 57.2958f);
+				}
+			}
 			__try { ShoulderTick(player, dt, now); }
 			__except(EXCEPTION_EXECUTE_HANDLER) { g_shOn = false; }
 
@@ -3045,14 +3064,29 @@ namespace
 					else
 					{
 						// Primeira pessoa: a vista e o corpo. Erro medido pela direcao REAL da vista, zona morta pequena, puxao suave.
+						// v0.16.1: o ponto de mira tem de ficar no CENTRO do ecra. Uma correcao (ganho 0.5) por leitura nova da camera.
 						float wy = g_targetYaw;
 						float o2[3], d2[3];
+						bool fpHold = false; float dtf = dt;
 						if(CameraRay(player, o2, d2))
-							wy = WrapPi(rot.z + WrapPi(atan2f(g_aimX - o2[0], g_aimY - o2[1]) - atan2f(d2[0], d2[1])));
+						{
+							static float s_rf = 1000.0f; static DWORD s_tf = 0;
+							const float rayYaw = atan2f(d2[0], d2[1]);
+							const float errYaw = WrapPi(atan2f(g_aimX - o2[0], g_aimY - o2[1]) - rayYaw);
+							g_ctrErrYaw = errYaw;
+							if(fabsf(WrapPi(rayYaw - s_rf)) < 0.00002f && (DWORD)(now - s_tf) < 100) fpHold = true;
+							else
+							{
+								dtf = (float)(DWORD)(now - s_tf) * 0.001f; if(dtf < 0.001f) dtf = 0.001f; if(dtf > 0.05f) dtf = 0.05f;
+								s_rf = rayYaw; s_tf = now;
+								wy = WrapPi(rot.z + 0.5f * errYaw);
+							}
+						}
+						else wy = rot.z;
 						const float dl = WrapPi(wy - rot.z);
 						if(fabsf(dl) <= softDz) wy = rot.z;
 						else wy = WrapPi(rot.z + dl - (dl > 0.0f ? softDz : -softDz));
-						stepYaw = StepToward(rot.z, wy, true, dt, softMax, softSm);
+						stepYaw = fpHold ? 0.0f : StepToward(rot.z, wy, true, dtf, softMax, softSm);
 					}
 				}
 				else stepYaw = StepToward(rot.z, g_targetYaw, true, dt, maxRad, g_cfg.smoothing);
@@ -3076,11 +3110,31 @@ namespace
 					if(up < -limitRad) up = -limitRad;
 					if(viewCtl && softFP)
 					{
-						float wp = -up * vSign;
+						// v0.16.1: inclinacao medida pela direcao REAL da vista (ponto de mira no centro do ecra), uma correcao por leitura.
+						float wp = rot.x;
+						bool pHold = false; float dtp = dt;
+						float o4[3], d4[3];
+						if(CameraRay(player, o4, d4))
+						{
+							static float s_rp = 1000.0f; static DWORD s_tp = 0;
+							const float hr = sqrtf(d4[0] * d4[0] + d4[1] * d4[1]);
+							const float rayUp = atan2f(d4[2], hr > 0.0001f ? hr : 0.0001f);
+							const float hx = g_aimX - o4[0], hy = g_aimY - o4[1];
+							const float aimUp = atan2f(g_aimZ - o4[2], sqrtf(hx * hx + hy * hy) > 1.0f ? sqrtf(hx * hx + hy * hy) : 1.0f);
+							const float errUp = aimUp - rayUp;
+							g_ctrErrPitch = errUp;
+							if(fabsf(rayUp - s_rp) < 0.00002f && (DWORD)(now - s_tp) < 100) pHold = true;
+							else
+							{
+								dtp = (float)(DWORD)(now - s_tp) * 0.001f; if(dtp < 0.001f) dtp = 0.001f; if(dtp > 0.05f) dtp = 0.05f;
+								s_rp = rayUp; s_tp = now;
+								wp = rot.x - 0.5f * errUp;		// positivo = olhar para baixo
+							}
+						}
 						const float dp = wp - rot.x;
 						if(fabsf(dp) <= softDz) wp = rot.x;
 						else wp = rot.x + dp - (dp > 0.0f ? softDz : -softDz);
-						rot.x += StepToward(rot.x, wp, false, dt, softMax, softSm);
+						if(!pHold) rot.x += StepToward(rot.x, wp, false, dtp, softMax, softSm);
 					}
 					else rot.x += StepToward(rot.x, -up * vSign, false, dt, maxRad, g_cfg.smoothing);	// positivo = olhar para baixo
 					if(!firstPerson) tiltUsed = true;		// em primeira pessoa rot.x e a propria vista: nao se repoe
@@ -3126,6 +3180,7 @@ namespace
 									{
 										dtc = (float)(DWORD)(now - s_t0) * 0.001f; if(dtc < 0.001f) dtc = 0.001f; if(dtc > 0.05f) dtc = 0.05f;
 										s_ray0 = rayYaw; s_t0 = now;
+										g_ctrErrYaw = WrapPi(atan2f(g_aimX - o2[0], g_aimY - o2[1]) - rayYaw);
 										wantYaw = WrapPi(cy + 0.5f * WrapPi(atan2f(g_aimX - o2[0], g_aimY - o2[1]) - rayYaw));
 									}
 								}
@@ -3180,18 +3235,36 @@ namespace
 						if(g_cfg.lockCameraPitch && CameraRay(player, o, dd))
 						{
 							const float hx = g_aimX - o[0], hy = g_aimY - o[1];
+							float cp = *(float *)(cs + 0x54);
+							// v0.16.1: com o arco puxado a inclinacao e corrigida pelo erro REAL (ponto de mira vs centro do ecra), uma vez por leitura.
 							float want = -atan2f(g_aimZ - o[2], sqrtf(hx * hx + hy * hy) > 1.0f ? sqrtf(hx * hx + hy * hy) : 1.0f);
-							want += g_cfg.aimOffY * kPi / 180.0f;		// alvo acima do centro = camera um pouco mais para baixo
+							bool bpHold = false; float dtb = dt;
+							if(bowLockCam)
+							{
+								static float s_rb = 1000.0f; static DWORD s_tb = 0;
+								const float hr = sqrtf(dd[0] * dd[0] + dd[1] * dd[1]);
+								const float rayUp = atan2f(dd[2], hr > 0.0001f ? hr : 0.0001f);
+								const float aimUp = -want;
+								g_ctrErrPitch = aimUp - rayUp;
+								if(fabsf(rayUp - s_rb) < 0.00002f && (DWORD)(now - s_tb) < 100) bpHold = true;
+								else
+								{
+									dtb = (float)(DWORD)(now - s_tb) * 0.001f; if(dtb < 0.001f) dtb = 0.001f; if(dtb > 0.05f) dtb = 0.05f;
+									s_rb = rayUp; s_tb = now;
+									want = cp - 0.5f * (aimUp - rayUp);
+								}
+							}
+							else want += g_cfg.aimOffY * kPi / 180.0f;		// alvo acima do centro = camera um pouco mais para baixo
 							if(want >  1.1f) want =  1.1f;
 							if(want < -1.1f) want = -1.1f;
-							float cp = *(float *)(cs + 0x54);
+							if(bpHold) want = cp;
 							{
 								const float dzp = dzRad;
 								const float dp = want - cp;
 								if(fabsf(dp) <= dzp) want = cp;
 								else want = cp + dp - (dp > 0.0f ? dzp : -dzp);
 							}
-							cp += StepToward(cp, want, false, dt, camMax, camSmooth);
+							cp += StepToward(cp, want, false, dtb, camMax, camSmooth);
 							*(float *)(cs + 0x54) = cp;
 							*(float *)(cs + 0x58) = cp;
 						}
