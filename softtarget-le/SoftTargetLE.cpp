@@ -33,7 +33,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.16.5 (arco em 3a pessoa: com a puxada o corpo e a camera seguem o alvo; primeira pessoa suave; so age com jogo carregado e sem menus)"
+#define PLUGIN_VERSION_STR	"0.16.6 (arco em 3a pessoa: inclinacao do corpo alinhada antes da puxada e sem repor a vista da 1a pessoa; corpo e camera seguem o alvo)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -3066,7 +3066,10 @@ namespace
 			const bool firstPerson = IsFirstPerson();
 			// Inclinar o corpo (bracos): pela opcao de mira vertical, ou com o lock-on proprio a prever um disparo / em primeira pessoa.
 			const bool rangedNow = RangedHeld(player) || g_assist != 0;
-			const bool useTilt = g_hasPitch && (((g_cfg.verticalMode & 1) && rangedNow) || (g_lockOwn && (g_assist || firstPerson)));
+			// v0.16.6: com o lock e o arco equipado (3a pessoa) a inclinacao do corpo ja vai para o alvo ANTES da puxada; assim o corpo nao arranca
+			// com a inclinacao antiga (por exemplo a vista para o chao herdada da 1a pessoa) e a camera nao tem de "viajar" ao puxar.
+			const bool bowReady3 = g_lockOwn && !firstPerson && g_cfg.bowLockCamera && BowEquipped(player);
+			const bool useTilt = g_hasPitch && (((g_cfg.verticalMode & 1) && rangedNow) || (g_lockOwn && (g_assist || firstPerson)) || bowReady3);
 
 			if(g_active && !suppress && !sprintHold)
 			{
@@ -3074,7 +3077,7 @@ namespace
 				{
 					// Inicio da sessao: guarda de onde partimos (rumo e inclinacao do corpo).
 					homeYaw = rot.z;
-					homePitch = rot.x;
+					homePitch = (firstPerson || fabsf(rot.x) > 0.6f) ? 0.0f : rot.x;		// a inclinacao herdada da 1a pessoa nao e para repor
 					tiltUsed = false;
 					phase = 1;
 				}
