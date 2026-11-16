@@ -33,7 +33,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.16.4 (arco em 3a pessoa: camera corrigida pelo angulo previsto no mundo, sem pausas; primeira pessoa suave; so age com jogo carregado e sem menus)"
+#define PLUGIN_VERSION_STR	"0.16.5 (arco em 3a pessoa: com a puxada o corpo e a camera seguem o alvo; primeira pessoa suave; so age com jogo carregado e sem menus)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -3084,7 +3084,14 @@ namespace
 				if(fastHold) stepYaw = 0.0f;
 				else if(viewCtl && (softFP || bowDrawing))
 				{
-					if(!softFP) stepYaw = 0.0f;		// arco puxado: o jogo leva o corpo atras da camera; so a camera e puxada
+					if(!softFP)
+					{
+						// v0.16.5: com o arco puxado o corpo SEGUE o alvo continuamente (como no perfil normal), virando para onde a camera
+						// (centrada no alvo) aponta. Antes o corpo ficava preso na direcao do inicio da puxada e so alcancava o alvo ao soltar.
+						float wyb = g_targetYaw; float ob[3], db[3];
+						if(CameraRay(player, ob, db)) wyb = atan2f(g_aimX - ob[0], g_aimY - ob[1]);
+						stepYaw = StepToward(rot.z, wyb, true, dt, maxRad, g_cfg.smoothing);
+					}
 					else
 					{
 						// Primeira pessoa: a vista e o corpo. Erro medido pela direcao REAL da vista, zona morta pequena, puxao suave.
