@@ -19,7 +19,7 @@ int ocount
 int lang		; 0 = English, 1 = Portugues
 
 int Function GetVersion()
-	return 20
+	return 21
 EndFunction
 
 Function InitTables()
@@ -460,6 +460,8 @@ Function PageLock()
 	AddHeaderOption(T("Shot prediction (only with lock-on)", "Previsão do disparo (só com lock-on)"))
 	AddEmptyOption()
 	AddToggleRow("PredictEnabled", T("Predict the shot", "Prever o disparo"), 1.0, T("While you draw a bow / crossbow or hold a spell button with the lock on, the aim leads a moving target. Without lock-on the shot is the normal one.", "Enquanto puxa o arco / besta ou segura o botão de uma magia com o lock ligado, a mira antecipa o alvo em movimento. Sem lock-on o disparo é o normal."))
+	AddToggleRow("PredictAlways", T("Predict with the bow equipped", "Prever com o arco equipado"), 1.0, T("With the lock on and a bow equipped, the aim point already includes the lead before you draw, so the camera does not jump when you start drawing.", "Com o lock ligado e o arco equipado, o ponto de mira já inclui a antecipação antes de puxar, para a câmera não saltar ao começar a puxar."))
+	AddToggleRow("LockTiltAlways", T("Head looks at the target (third person)", "Cabeça olha para o alvo (terceira pessoa)"), 1.0, T("In third person with the lock on, the body/head tilt follows the target with any weapon, not only with the bow.", "Em terceira pessoa com o lock ligado, a inclinação do corpo/cabeça segue o alvo com qualquer arma, não só com o arco."))
 	AddSliderRow("PredictStrength", T("Prediction strength", "Força da previsão"), 0.0, 150.0, 5.0, 100.0, 1.0, 0, "{0} %", T("How much of the computed lead is applied. Lower if shots go too far ahead of the target, raise if they fall behind.", "Quanto da antecipação calculada é aplicada. Baixe se os tiros vão muito à frente do alvo, suba se ficam atrás."))
 	AddSliderRow("ProjectileSpeed", T("Projectile speed", "Velocidade do projétil"), 1000.0, 12000.0, 100.0, 4500.0, 1.0, 0, "{0}", T("Arrow speed of bows and crossbows, units per second. Spells use the speed in the game data (or SpellProjectileSpeed in the ini).", "Velocidade da flecha de arcos e bestas, em unidades por segundo. As magias usam a velocidade dos dados do jogo (ou SpellProjectileSpeed no ini)."))
 	AddSliderRow("ProjectileSpeedScale", T("Projectile speed fine tuning", "Ajuste fino da velocidade"), 20.0, 300.0, 5.0, 100.0, 1.0, 0, "{0} %", T("Shots land BEHIND a moving target: lower this. Shots land IN FRONT: raise it. Applies to arrows and spells.", "Os tiros caem ATRÁS do alvo em movimento: baixe. Caem À FRENTE: suba. Vale para flechas e magias."))
