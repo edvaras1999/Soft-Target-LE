@@ -33,7 +33,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.16.6 (arco em 3a pessoa: inclinacao do corpo alinhada antes da puxada e sem repor a vista da 1a pessoa; corpo e camera seguem o alvo)"
+#define PLUGIN_VERSION_STR	"0.16.7 (previsao do alvo ativa com o arco equipado, velocidade do alvo a cada 50 ms; cabeca/corpo olham sempre para o lock em 3a pessoa)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -100,6 +100,8 @@ namespace
 		int		lockCameraPitch;// 1 = a camera tambem sobe/desce para o alvo
 		float	lockCameraSmooth;// velocidade da camera a seguir o alvo (maior = mais rapido)
 		int		predictEnabled;	// 1 = previsao do disparo com o lock-on ativo
+		int		predictAlways;	// 1 = com o arco equipado e o lock ligado o ponto de mira ja inclui a previsao (nao so com a corda puxada)
+		int		lockTiltAlways;	// 1 = em 3a pessoa com o lock ligado a inclinacao do corpo/cabeca vai sempre para o alvo (qualquer arma)
 		float	projectileSpeed;// velocidade do projetil, unidades por segundo
 		float	projectileGravity;// queda do projetil (unidades por segundo ao quadrado; 0 = sem compensacao)
 		float	predictStrength;// 0..100: quanto da previsao se aplica
@@ -214,6 +216,8 @@ namespace
 		{ "LockCameraPitch",		'i', &g_cfg.lockCameraPitch,	1.0f },
 		{ "LockCameraSmooth",		'f', &g_cfg.lockCameraSmooth,	5.0f },
 		{ "PredictEnabled",			'i', &g_cfg.predictEnabled,		1.0f },
+		{ "PredictAlways",			'i', &g_cfg.predictAlways,		1.0f },
+		{ "LockTiltAlways",			'i', &g_cfg.lockTiltAlways,		1.0f },
 		{ "ProjectileSpeed",		'f', &g_cfg.projectileSpeed,	4500.0f },
 		{ "ProjectileGravity",		'f', &g_cfg.projectileGravity,	470.0f },
 		{ "PredictStrength",		'f', &g_cfg.predictStrength,	100.0f },
@@ -376,6 +380,10 @@ namespace
 		if(g_cfg.lockLoseSightMs < 0)		g_cfg.lockLoseSightMs = 0;
 		if(g_cfg.lockCameraSmooth < 1.0f)	g_cfg.lockCameraSmooth = 1.0f;
 		if(g_cfg.projectileSpeed < 500.0f)	g_cfg.projectileSpeed = 500.0f;
+		if(g_cfg.predictAlways < 0)			g_cfg.predictAlways = 0;
+		if(g_cfg.predictAlways > 1)			g_cfg.predictAlways = 1;
+		if(g_cfg.lockTiltAlways < 0)		g_cfg.lockTiltAlways = 0;
+		if(g_cfg.lockTiltAlways > 1)		g_cfg.lockTiltAlways = 1;
 		if(g_cfg.spellSpeed < 300.0f)		g_cfg.spellSpeed = 300.0f;
 		if(g_cfg.bowShX < 0.0f)				g_cfg.bowShX = 0.0f;
 		if(g_cfg.bowShX > 120.0f)			g_cfg.bowShX = 120.0f;
@@ -2133,12 +2141,12 @@ namespace
 			g_lockPrev[0] = pos.x; g_lockPrev[1] = pos.y; g_lockPrev[2] = pos.z;
 			g_lockPrevTick = now;
 		}
-		else if((LONG)(now - g_lockPrevTick) >= 100)
+		else if((LONG)(now - g_lockPrevTick) >= 50)
 		{
 			const float s = (now - g_lockPrevTick) / 1000.0f;
 			float nv[3] = { (pos.x - g_lockPrev[0]) / s, (pos.y - g_lockPrev[1]) / s, (pos.z - g_lockPrev[2]) / s };
 			if(sqrtf(nv[0] * nv[0] + nv[1] * nv[1] + nv[2] * nv[2]) > 4000.0f) nv[0] = nv[1] = nv[2] = 0.0f;	// salto/teleporte
-			for(int k = 0; k < 3; ++k) g_lockVel[k] = g_lockVel[k] * 0.5f + nv[k] * 0.5f;
+			for(int k = 0; k < 3; ++k) g_lockVel[k] = g_lockVel[k] * 0.4f + nv[k] * 0.6f;		// v0.16.7: leitura a cada 50 ms (antes 100), menos atraso
 			g_lockPrev[0] = pos.x; g_lockPrev[1] = pos.y; g_lockPrev[2] = pos.z;
 			g_lockPrevTick = now;
 		}
@@ -2147,7 +2155,9 @@ namespace
 		float ax = pos.x + g_lockOff[0], ay = pos.y + g_lockOff[1], az = pos.z + g_lockOff[2];
 
 		if(RangedHeld(player)) g_assistUntil = now + 350;		// o disparo sai ao SOLTAR: mantem a ajuda um instante
-		const bool assist = ((LONG)(g_assistUntil - now) > 0);
+		// v0.16.7: com o arco equipado a previsao ja esta ativa antes de puxar; o ponto de mira nao salta ao comecar a puxar.
+		const bool bowAlways = g_cfg.predictAlways && BowEquipped(player);
+		const bool assist = ((LONG)(g_assistUntil - now) > 0) || bowAlways;
 		g_assist = assist ? 1 : 0;
 		if(assist && g_cfg.predictEnabled)
 		{
@@ -3069,7 +3079,9 @@ namespace
 			// v0.16.6: com o lock e o arco equipado (3a pessoa) a inclinacao do corpo ja vai para o alvo ANTES da puxada; assim o corpo nao arranca
 			// com a inclinacao antiga (por exemplo a vista para o chao herdada da 1a pessoa) e a camera nao tem de "viajar" ao puxar.
 			const bool bowReady3 = g_lockOwn && !firstPerson && g_cfg.bowLockCamera && BowEquipped(player);
-			const bool useTilt = g_hasPitch && (((g_cfg.verticalMode & 1) && rangedNow) || (g_lockOwn && (g_assist || firstPerson)) || bowReady3);
+			// v0.16.7: LockTiltAlways: em 3a pessoa, com o lock ligado, o corpo/cabeca olha sempre para o alvo (nao so com o arco).
+			const bool tiltAlways3 = g_cfg.lockTiltAlways && g_lockOwn && !firstPerson;
+			const bool useTilt = g_hasPitch && (((g_cfg.verticalMode & 1) && rangedNow) || (g_lockOwn && (g_assist || firstPerson)) || bowReady3 || tiltAlways3);
 
 			if(g_active && !suppress && !sprintHold)
 			{
