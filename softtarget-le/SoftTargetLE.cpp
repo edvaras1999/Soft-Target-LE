@@ -34,7 +34,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.17.0 (mascara Keytrace sem habilidades: HasMagicEffect do Keytrace.esp responde pela direcao do movimento; postura do corpo nivela ao sair da 1a pessoa)"
+#define PLUGIN_VERSION_STR	"0.17.1 (mascara Keytrace tambem para o Themis/OAR: rotina interna MagicTarget::HasMagicEffect; postura do corpo nivela ao sair da 1a pessoa)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -1860,6 +1860,64 @@ namespace
 		SafeWrite32(kKtEvalSlot, (UInt32)&KtEvalWrap);
 		g_ktInstalled = 1;
 		_MESSAGE("keytrace-mask: HasMagicEffect condition hooked");
+	}
+
+	// v0.17.1: o Themis_OAR (e provavelmente o DAR) nao passa pela funcao de condicao: chama directamente a rotina interna do jogo
+	// 0x00662E80 (MagicTarget::HasMagicEffect, thiscall, 1 argumento = EffectSetting*, devolve bool em al, ret 4).
+	// Poe-se um desvio de 5 bytes no inicio dessa rotina; para o jogador e para os 4 efeitos Keytrace responde pela direcao,
+	// para todo o resto corre a rotina original (copiada para um trampolim).
+	typedef bool (__fastcall * KtHasMeFn)(void * self, void * edxUnused, void * mgef);
+	const UInt32	kKtHasMeAddr	= 0x00662E80;
+	KtHasMeFn		g_ktTramp		= NULL;
+	volatile LONG	g_ktHasMeLogN	= 0;
+	volatile LONG	g_ktHasMeOn		= 0;
+
+	bool __fastcall KtHasMeWrap(void * self, void * edxUnused, void * mgef)
+	{
+		if(g_cfg.dmkKeytrace && g_ktModIndex >= 0 && self && mgef)
+		{
+			PlayerCharacter * p = Engine::Player();
+			if(p && self == (void *)((UInt8 *)p + 0x54))
+			{
+				UInt32 fid = 0; bool isMgef = false;
+				__try { TESForm * f = (TESForm *)mgef; fid = f->formID; isMgef = (f->formType == 0x12); }
+				__except(EXCEPTION_EXECUTE_HANDLER) { isMgef = false; }
+				if(isMgef && (LONG)(fid >> 24) == g_ktModIndex && (fid & 0x00FFFFFF) >= 0x801 && (fid & 0x00FFFFFF) <= 0x804)
+				{
+					const int idx = (int)(fid & 0x00FFFFFF) - 0x801;
+					const int dir = (int)g_dmkDir;
+					const bool on = KtMaskFor(idx, dir);
+					if(g_ktHasMeLogN < 20) { ++g_ktHasMeLogN; _MESSAGE("keytrace-mask: [MagicTarget] HasMagicEffect asked for %08X (dir=%d) -> %s", (unsigned)fid, dir, on ? "true" : "false"); }
+					return on;
+				}
+			}
+		}
+		return g_ktTramp(self, edxUnused, mgef);
+	}
+
+	void KtInstallHasMe()
+	{
+		if(g_ktHasMeOn) return;
+		static const UInt8 kPro[] = { 0x8B,0x01, 0x8B,0x50,0x1C, 0x53, 0x56, 0xFF,0xD2, 0x8B,0xF0 };
+		bool ok = false;
+		__try { ok = memcmp((const void *)kKtHasMeAddr, kPro, sizeof(kPro)) == 0; }
+		__except(EXCEPTION_EXECUTE_HANDLER) { ok = false; }
+		if(!ok) { _MESSAGE("keytrace-mask: engine routine MagicTarget::HasMagicEffect NOT recognised - OAR/DAR mask stays OFF"); return; }
+		UInt8 * tr = (UInt8 *)VirtualAlloc(NULL, 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+		if(!tr) { _MESSAGE("keytrace-mask: could not allocate the trampoline"); return; }
+		memcpy(tr, (const void *)kKtHasMeAddr, 5);
+		tr[5] = 0xE9;
+		*(UInt32 *)(tr + 6) = (kKtHasMeAddr + 5) - ((UInt32)tr + 10);
+		g_ktTramp = (KtHasMeFn)tr;
+		UInt8 patch[5]; patch[0] = 0xE9;
+		*(UInt32 *)(patch + 1) = (UInt32)&KtHasMeWrap - (kKtHasMeAddr + 5);
+		DWORD oldProt = 0;
+		if(!VirtualProtect((void *)kKtHasMeAddr, 5, PAGE_EXECUTE_READWRITE, &oldProt)) { _MESSAGE("keytrace-mask: VirtualProtect failed"); return; }
+		memcpy((void *)kKtHasMeAddr, patch, 5);
+		VirtualProtect((void *)kKtHasMeAddr, 5, oldProt, &oldProt);
+		FlushInstructionCache(GetCurrentProcess(), (void *)kKtHasMeAddr, 5);
+		g_ktHasMeOn = 1;
+		_MESSAGE("keytrace-mask: MagicTarget::HasMagicEffect hooked (for OAR/DAR packs)");
 	}
 
 	void KtResolveMod()
@@ -3709,6 +3767,8 @@ namespace
 				ResolveExternal();
 				KtResolveMod();
 				KtInstall();
+				_MESSAGE("keytrace-mask: DmkKeytrace=%d", g_cfg.dmkKeytrace);
+				if(g_cfg.dmkKeytrace) KtInstallHasMe();
 				break;
 
 			case SKSEMessagingInterface::kMessage_PreLoadGame:
