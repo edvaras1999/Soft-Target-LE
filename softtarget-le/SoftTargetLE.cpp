@@ -22,6 +22,7 @@
 #include "skse/Hooks_UI.h"
 #include "skse/GameThreads.h"
 #include "skse/GameData.h"
+#include "skse/SafeWrite.h"
 #include "skse/ScaleformMovie.h"
 #include "skse/ScaleformCallbacks.h"
 #include "Log.h"
@@ -33,7 +34,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.16.7 (previsao do alvo ativa com o arco equipado, velocidade do alvo a cada 50 ms; cabeca/corpo olham sempre para o lock em 3a pessoa)"
+#define PLUGIN_VERSION_STR	"0.17.0 (mascara Keytrace sem habilidades: HasMagicEffect do Keytrace.esp responde pela direcao do movimento; postura do corpo nivela ao sair da 1a pessoa)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -161,6 +162,7 @@ namespace
 		float	lockSoftDeadZone;	// zona morta, graus
 		// ---- v0.15.0: compatibilidade DMK (variaveis de animacao do jogador para pacotes OAR)
 		int		dmkKeytrace;		// 1 = adiciona uma vez as 4 habilidades do Keytrace.esp (LE) ao jogador (pacotes que usam HasMagicEffect Keytrace)
+		int		levelPosture;		// 1 = ao sair da 1a pessoa (sem lock/arco) a inclinacao do corpo volta ao nivel
 		int		dmkCompat;			// 1 = publica DirecionalCycleMoveset (direcao do movimento) e CameraMovementCMF (direcao da camera)
 	};
 	Config g_cfg;
@@ -267,6 +269,7 @@ namespace
 		{ "LockSoftSmooth",			'f', &g_cfg.lockSoftSmooth,		6.0f },
 		{ "LockSoftSpeedDegPerSec",	'f', &g_cfg.lockSoftSpeedDeg,	240.0f },
 		{ "LockSoftDeadZoneDegrees",'f', &g_cfg.lockSoftDeadZone,	0.6f },
+		{ "LevelPosture",			'i', &g_cfg.levelPosture,		1.0f },
 		{ "DmkCompat",				'i', &g_cfg.dmkCompat,			0.0f },
 		{ "DmkKeytrace",			'i', &g_cfg.dmkKeytrace,		0.0f },
 	};
@@ -407,6 +410,8 @@ namespace
 		if(g_cfg.lockSoftSpeedDeg > 1440.0f)g_cfg.lockSoftSpeedDeg = 1440.0f;
 		if(g_cfg.lockSoftDeadZone < 0.0f)	g_cfg.lockSoftDeadZone = 0.0f;
 		if(g_cfg.lockSoftDeadZone > 5.0f)	g_cfg.lockSoftDeadZone = 5.0f;
+		if(g_cfg.levelPosture < 0)			g_cfg.levelPosture = 0;
+		if(g_cfg.levelPosture > 1)			g_cfg.levelPosture = 1;
 		if(g_cfg.dmkCompat < 0)				g_cfg.dmkCompat = 0;
 		if(g_cfg.dmkCompat > 1)				g_cfg.dmkCompat = 1;
 		if(g_cfg.dmkKeytrace < 0)			g_cfg.dmkKeytrace = 0;
@@ -1786,65 +1791,84 @@ namespace
 	};
 
 
-	// ------------------------------------------------------------------ Keytrace (v0.16.0)
+	// ------------------------------------------------------------------ Keytrace como mascara (v0.17.0)
 	// Pacotes DAR/OAR feitos para o DtryKeyUtil testam HasMagicEffect("Keytrace.esp"|0x801..0x804).
-	// O Keytrace.esp do SoftTarget traz 4 habilidades (0x806..0x809) cujos efeitos tem a condicao
-	// GetGraphVariableInt("DirecionalCycleMoveset") == N: o motor liga e desliga cada efeito sozinho com a direcao
-	// que o SoftTarget publica. Aqui so se adicionam as habilidades ao jogador (uma vez), com a rotina interna do jogo.
-	typedef bool (__fastcall * KtAddSpellFn)(void * actor, void * edxUnused, SpellItem * spell);
-	const UInt32	kKtAddSpellAddr	= 0x006EC120;
+	// O Keytrace.esp do SoftTarget so tem 4 efeitos vazios (sem habilidades, sem condicoes). A funcao do motor que avalia a condicao
+	// HasMagicEffect e embrulhada: para o jogador e para esses 4 efeitos responde pela direcao do movimento (g_dmkDir);
+	// para tudo o resto chama a funcao original. Nada e adicionado ao jogador nem ao save.
+	//   0x801 frente: 1,2,8,9,11,12,14   0x802 esquerda: 6,7,8,10,11,13,14   0x803 tras: 4,5,6,9,12,13,14   0x804 direita: 2,3,4,10,11,12,13
+	typedef bool (__cdecl * KtEvalFn)(void * thisObj, void * arg1, void * arg2, double * result);
+	const UInt32	kKtTableEntry	= 0x012509F0;		// entrada "HasMagicEffect" da tabela de funcoes de condicao
+	const UInt32	kKtEvalSlot		= 0x01250A10;		// ponteiro da funcao de avaliacao nessa entrada
+	const UInt32	kKtEvalOrig		= 0x0050AEA0;
+	KtEvalFn		g_ktOrig		= NULL;
+	volatile LONG	g_ktModIndex	= -1;				// indice do Keytrace.esp na ordem de carga (-1 = nao carregado)
+	volatile LONG	g_ktInstalled	= 0;
+	volatile LONG	g_ktLogN		= 0;
+	volatile LONG	g_ktAnyLogN		= 0;
 
-	bool KtSigOk()
+	inline bool KtMaskFor(int idx, int dir)	// idx 0..3 = frente, esquerda, tras, direita
 	{
-		static const UInt8 kSig[] = { 0x83,0xEC,0x14, 0x53,0x56,0x57, 0x8B,0x7C,0x24,0x24, 0x32,0xDB, 0x8B,0xF1, 0x85,0xFF, 0x0F,0x84,0x40,0x01,0x00,0x00, 0x8B,0xCF };
-		bool ok = false;
-		__try { ok = memcmp((const void *)kKtAddSpellAddr, kSig, sizeof(kSig)) == 0; }
-		__except(EXCEPTION_EXECUTE_HANDLER) { ok = false; }
-		return ok;
+		static const unsigned short kM[4] = {
+			(1<<1)|(1<<2)|(1<<8)|(1<<9)|(1<<11)|(1<<12)|(1<<14),
+			(1<<6)|(1<<7)|(1<<8)|(1<<10)|(1<<11)|(1<<13)|(1<<14),
+			(1<<4)|(1<<5)|(1<<6)|(1<<9)|(1<<12)|(1<<13)|(1<<14),
+			(1<<2)|(1<<3)|(1<<4)|(1<<10)|(1<<11)|(1<<12)|(1<<13) };
+		return dir > 0 && dir < 16 && ((kM[idx] >> dir) & 1);
 	}
 
-	bool KtCallAdd(PlayerCharacter * player, SpellItem * spell)
+	bool __cdecl KtEvalWrap(void * thisObj, void * arg1, void * arg2, double * result)
 	{
-		bool r = false;
-		__try { KtAddSpellFn fn = (KtAddSpellFn)kKtAddSpellAddr; r = fn(player, NULL, spell); }
-		__except(EXCEPTION_EXECUTE_HANDLER) { ++g_dmkFaults; _MESSAGE("keytrace: fault while adding the ability - disabled"); g_ktState = 2; }
-		return r;
-	}
-
-	// Corre na thread do jogo.
-	void KtEnsureNow()
-	{
-		if(g_ktState != 0) return;
-		if(!KtSigOk()) { g_ktState = 2; _MESSAGE("keytrace: engine routine AddSpell NOT recognised - Keytrace compatibility stays OFF"); return; }
-		DataHandler * dh = DataHandler::GetSingleton();
-		PlayerCharacter * player = Engine::Player();
-		if(!dh || !player) return;
-		const ModInfo * mi = dh->LookupModByName("Keytrace.esp");
-		if(!mi || mi->modIndex == 0xFF) { g_ktState = 2; _MESSAGE("keytrace: Keytrace.esp (the SoftTarget LE version) is not loaded - Keytrace compatibility stays OFF"); return; }
-		int added = 0;
-		for(int i = 0; i < 4; ++i)
+		if(g_cfg.dmkKeytrace && g_ktModIndex >= 0 && thisObj && arg1 && result)
 		{
-			const UInt32 id = ((UInt32)mi->modIndex << 24) | (UInt32)(0x806 + i);
-			TESForm * f = LookupFormByID(id);
-			SpellItem * sp = f ? DYNAMIC_CAST(f, TESForm, SpellItem) : NULL;
-			if(!sp) { g_ktState = 2; _MESSAGE("keytrace: ability %08X not found in Keytrace.esp - Keytrace compatibility stays OFF", (unsigned)id); return; }
-			const bool r = KtCallAdd(player, sp);
-			if(g_ktState == 2) return;
-			_MESSAGE("keytrace: ability %08X %s", (unsigned)id, r ? "added" : "already there (or refused by the game)");
-			if(r) ++added;
+			UInt32 fid = 0; bool isMgef = false;
+			__try
+			{
+				TESForm * f = (TESForm *)arg1;
+				fid = f->formID; isMgef = (f->formType == 0x12);
+			}
+			__except(EXCEPTION_EXECUTE_HANDLER) { isMgef = false; }
+			if(g_ktAnyLogN < 6) { ++g_ktAnyLogN; _MESSAGE("keytrace-mask: HasMagicEffect evaluated by the engine for form %08X (actor %p, player %p)", (unsigned)fid, thisObj, (void *)Engine::Player()); }
+			if(isMgef && (LONG)(fid >> 24) == g_ktModIndex && (fid & 0x00FFFFFF) >= 0x801 && (fid & 0x00FFFFFF) <= 0x804 && thisObj == (void *)Engine::Player())
+			{
+				const int idx = (int)(fid & 0x00FFFFFF) - 0x801;
+				const int dir = (int)g_dmkDir;
+				const bool on = KtMaskFor(idx, dir);
+				*result = on ? 1.0 : 0.0;
+				if(g_ktLogN < 20) { ++g_ktLogN; _MESSAGE("keytrace-mask: HasMagicEffect asked for %08X (dir=%d) -> %s", (unsigned)fid, dir, on ? "true" : "false"); }
+				return true;
+			}
 		}
-		g_ktState = 1;
-		_MESSAGE("keytrace: done (%d new abilities). The direction effects now follow DirecionalCycleMoveset.", added);
+		return g_ktOrig(thisObj, arg1, arg2, result);
 	}
 
-	class KtTask : public TaskDelegate
+	void KtInstall()
 	{
-	public:
-		virtual void Run(void) { KtEnsureNow(); g_ktPendingFlag = 0; }
-		virtual void Dispose(void) { delete this; }
-		static volatile LONG g_ktPendingFlag;
-	};
-	volatile LONG KtTask::g_ktPendingFlag = 0;
+		if(g_ktInstalled) return;
+		static const UInt8 kPro[] = { 0x8B,0x44,0x24,0x04, 0x56, 0x8B,0x74,0x24,0x14, 0xC7,0x06,0,0,0,0, 0xC7,0x46,0x04,0,0,0,0, 0x85,0xC0, 0x74,0x3B };
+		bool ok = false;
+		__try
+		{
+			const char * nm = *(const char **)(kKtTableEntry + 0x00);
+			const UInt32 opc = *(const UInt32 *)(kKtTableEntry + 0x08);
+			const UInt32 ev  = *(const UInt32 *)kKtEvalSlot;
+			ok = nm && strcmp(nm, "HasMagicEffect") == 0 && opc == 0x10D6 && ev == kKtEvalOrig && memcmp((const void *)kKtEvalOrig, kPro, sizeof(kPro)) == 0;
+		}
+		__except(EXCEPTION_EXECUTE_HANDLER) { ok = false; }
+		if(!ok) { _MESSAGE("keytrace-mask: condition function HasMagicEffect NOT recognised - Keytrace mask stays OFF"); return; }
+		g_ktOrig = (KtEvalFn)kKtEvalOrig;
+		SafeWrite32(kKtEvalSlot, (UInt32)&KtEvalWrap);
+		g_ktInstalled = 1;
+		_MESSAGE("keytrace-mask: HasMagicEffect condition hooked");
+	}
+
+	void KtResolveMod()
+	{
+		DataHandler * dh = DataHandler::GetSingleton();
+		const ModInfo * mi = dh ? dh->LookupModByName("Keytrace.esp") : NULL;
+		if(mi && mi->modIndex != 0xFF) { g_ktModIndex = mi->modIndex; _MESSAGE("keytrace-mask: Keytrace.esp found at load index %02X", (unsigned)mi->modIndex); }
+		else { g_ktModIndex = -1; _MESSAGE("keytrace-mask: Keytrace.esp is not loaded (install the SoftTarget Keytrace.esp for the mask to work)"); }
+	}
 
 	inline int DmkSectorFromVec(float x, float y)	// x = direita, y = frente
 	{
@@ -1906,14 +1930,14 @@ namespace
 	DWORD WINAPI DmkThread(LPVOID)
 	{
 		int lastDir = -1, lastCam = -1;
-		DWORD lastWrite = 0, camTick = 0, lastKt = 0;
+		DWORD lastWrite = 0, camTick = 0;
 		int camVal = 0;
 		for(;;)
 		{
-			Sleep(g_cfg.dmkCompat ? 8 : 100);
+			Sleep((g_cfg.dmkCompat || g_cfg.dmkKeytrace) ? 8 : 100);
 			const DWORD now = GetTickCount();
 			int dir = 0, cam = 0;
-			if(g_cfg.dmkCompat && g_cfg.enabled && g_gameLive && g_dmkReady && g_taskIface)
+			if(g_cfg.enabled && g_gameLive && ((g_cfg.dmkCompat && g_dmkReady && g_taskIface) || g_cfg.dmkKeytrace))
 			{
 				DmkCompute(now, &dir, &cam, &camVal, &camTick);
 			}
@@ -1925,9 +1949,8 @@ namespace
 				else if(s_hDir != 0 && (now - s_hTick) < 90) dir = s_hDir;
 				else s_hDir = 0;
 			}
-			if(g_cfg.dmkKeytrace && g_cfg.dmkCompat && g_ktState == 0 && g_ktGraphOk && !KtTask::g_ktPendingFlag && g_taskIface && (now - lastKt) > 3000)
-			{ lastKt = now; KtTask::g_ktPendingFlag = 1; g_taskIface->AddTask(new KtTask()); }
 			g_dmkDir = dir; g_dmkCam = cam;
+			if(!g_cfg.dmkCompat) { lastDir = dir; lastCam = cam; continue; }		// so a mascara Keytrace: nao se escreve no grafo
 			const bool changed = (dir != lastDir || cam != lastCam);
 			if(!changed && now - lastWrite < 500) continue;		// refresca de meio em meio segundo (o grafo reinicia ao mudar de area)
 			if(g_dmkPending && now - g_dmkQueuedAt < 500) continue;
@@ -3074,6 +3097,14 @@ namespace
 			const float vSign = g_cfg.verticalInvert ? -1.0f : 1.0f;
 			const bool returnAllowed = g_cfg.returnToHeading && !coeusProfile;
 			const bool firstPerson = IsFirstPerson();
+			{
+				// v0.17.0: ao sair da 1a pessoa sem lock nem arco, a inclinacao do corpo (vista para cima/baixo) volta ao nivel em ~350 ms.
+				static bool s_prevFP = false; static DWORD s_levelUntil = 0;
+				if(s_prevFP && !firstPerson) s_levelUntil = GetTickCount() + 350;
+				s_prevFP = firstPerson;
+				if(g_cfg.levelPosture && !firstPerson && !g_lockOwn && !(RangedHeld(player) || g_assist != 0) && (LONG)(s_levelUntil - GetTickCount()) > 0 && fabsf(rot.x) > 0.01f)
+					rot.x += StepToward(rot.x, 0.0f, false, dt, maxRad, 12.0f);
+			}
 			// Inclinar o corpo (bracos): pela opcao de mira vertical, ou com o lock-on proprio a prever um disparo / em primeira pessoa.
 			const bool rangedNow = RangedHeld(player) || g_assist != 0;
 			// v0.16.6: com o lock e o arco equipado (3a pessoa) a inclinacao do corpo ja vai para o alvo ANTES da puxada; assim o corpo nao arranca
@@ -3676,6 +3707,8 @@ namespace
 				ResolveIniPath();
 				LoadConfig();
 				ResolveExternal();
+				KtResolveMod();
+				KtInstall();
 				break;
 
 			case SKSEMessagingInterface::kMessage_PreLoadGame:
