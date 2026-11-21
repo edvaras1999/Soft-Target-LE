@@ -22,6 +22,7 @@
 #include "skse/Hooks_UI.h"
 #include "skse/GameThreads.h"
 #include "skse/GameData.h"
+#include "skse/GameExtraData.h"
 #include "skse/SafeWrite.h"
 #include "skse/ScaleformMovie.h"
 #include "skse/ScaleformCallbacks.h"
@@ -35,7 +36,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.18.1 (linha de visao para escolher alvos; alvo em bleedout mantem-se; diagnostico do pitch no Hard com arco)"
+#define PLUGIN_VERSION_STR	"0.18.2 (cauda de soltura do arco; sprint livre com lock; arco sem flechas; linha de visao mais tolerante; limites da camera com lock)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -170,6 +171,15 @@ namespace
 		int		dmkKeytrace;		// 1 = adiciona uma vez as 4 habilidades do Keytrace.esp (LE) ao jogador (pacotes que usam HasMagicEffect Keytrace)
 		int		levelPosture;		// 1 = ao sair da 1a pessoa (sem lock/arco) a inclinacao do corpo volta ao nivel
 		int		dmkCompat;			// 1 = publica DirecionalCycleMoveset (direcao do movimento) e CameraMovementCMF (direcao da camera)
+		// ---- v0.18.2
+		int		bowReleaseTailMs;	// depois de soltar o arco mantem o comportamento de "puxando" durante este tempo (0 = desligado)
+		int		losWaitMs;			// o lock espera ate este tempo pelo primeiro resultado da linha de visao
+		int		losGraceMs;			// um alvo visto ha menos deste tempo nao e dado como bloqueado
+		int		lockVertForgive;	// 1 = para prender/manter o lock conta so a diferenca horizontal quando o alvo esta muito acima/abaixo (encostas)
+		int		sprintFreeBody;		// 1 = com o lock, correr (Shift) deixa o corpo seguir a direcao das teclas; ao largar volta ao alvo
+		int		noAmmoGuard;		// 1 = arco sem flechas equipadas nao conta como "a mirar"
+		int		lockCamLimit;		// 1 = limita a inclinacao da camera de 3a pessoa com o lock (evita chao / 1a pessoa)
+		float	lockCamUpDeg;		// maximo a olhar para cima, graus
 	};
 	Config g_cfg;
 
@@ -226,8 +236,8 @@ namespace
 		{ "PredictEnabled",			'i', &g_cfg.predictEnabled,		1.0f },
 		{ "PredictAlways",			'i', &g_cfg.predictAlways,		1.0f },
 		{ "LockTiltAlways",			'i', &g_cfg.lockTiltAlways,		1.0f },
-		{ "ProjectileSpeed",		'f', &g_cfg.projectileSpeed,	4500.0f },
-		{ "ProjectileGravity",		'f', &g_cfg.projectileGravity,	50.0f },
+		{ "ProjectileSpeed",		'f', &g_cfg.projectileSpeed,	9000.0f },
+		{ "ProjectileGravity",		'f', &g_cfg.projectileGravity,	0.0f },
 		{ "PredictStrength",		'f', &g_cfg.predictStrength,	100.0f },
 		{ "PredictMinDistance",		'f', &g_cfg.predictMinDist,		150.0f },
 		{ "LockCameraAxis",			'i', &g_cfg.lockCameraAxis,		1.0f },
@@ -281,7 +291,15 @@ namespace
 		{ "LockSoftDeadZoneDegrees",'f', &g_cfg.lockSoftDeadZone,	0.6f },
 		{ "LevelPosture",			'i', &g_cfg.levelPosture,		1.0f },
 		{ "DmkCompat",				'i', &g_cfg.dmkCompat,			0.0f },
-		{ "DmkKeytrace",			'i', &g_cfg.dmkKeytrace,		0.0f },
+		{ "DmkKeytrace",			'i', &g_cfg.dmkKeytrace,		1.0f },
+		{ "BowReleaseTailMs",		'i', &g_cfg.bowReleaseTailMs,	400.0f },
+		{ "LosWaitMs",				'i', &g_cfg.losWaitMs,			40.0f },
+		{ "LosGraceMs",				'i', &g_cfg.losGraceMs,			1500.0f },
+		{ "LockVerticalForgive",	'i', &g_cfg.lockVertForgive,	1.0f },
+		{ "SprintFreeBody",			'i', &g_cfg.sprintFreeBody,		1.0f },
+		{ "NoAmmoGuard",			'i', &g_cfg.noAmmoGuard,		1.0f },
+		{ "LockCamLimit",			'i', &g_cfg.lockCamLimit,		1.0f },
+		{ "LockCamUpDegrees",		'f', &g_cfg.lockCamUpDeg,		40.0f },
 	};
 	const int kNumOpts = sizeof(g_opts) / sizeof(g_opts[0]);
 
@@ -444,6 +462,22 @@ namespace
 		if(g_cfg.dotSize > 400.0f)			g_cfg.dotSize = 400.0f;
 		if(g_cfg.dotOpacity < 10.0f)		g_cfg.dotOpacity = 10.0f;
 		if(g_cfg.dotOpacity > 100.0f)		g_cfg.dotOpacity = 100.0f;
+		if(g_cfg.bowReleaseTailMs < 0) g_cfg.bowReleaseTailMs = 0;
+		if(g_cfg.bowReleaseTailMs > 2000) g_cfg.bowReleaseTailMs = 2000;
+		if(g_cfg.losWaitMs < 0) g_cfg.losWaitMs = 0;
+		if(g_cfg.losWaitMs > 200) g_cfg.losWaitMs = 200;
+		if(g_cfg.losGraceMs < 0) g_cfg.losGraceMs = 0;
+		if(g_cfg.losGraceMs > 10000) g_cfg.losGraceMs = 10000;
+		if(g_cfg.lockVertForgive < 0) g_cfg.lockVertForgive = 0;
+		if(g_cfg.lockVertForgive > 1) g_cfg.lockVertForgive = 1;
+		if(g_cfg.sprintFreeBody < 0) g_cfg.sprintFreeBody = 0;
+		if(g_cfg.sprintFreeBody > 1) g_cfg.sprintFreeBody = 1;
+		if(g_cfg.noAmmoGuard < 0) g_cfg.noAmmoGuard = 0;
+		if(g_cfg.noAmmoGuard > 1) g_cfg.noAmmoGuard = 1;
+		if(g_cfg.lockCamLimit < 0) g_cfg.lockCamLimit = 0;
+		if(g_cfg.lockCamLimit > 1) g_cfg.lockCamLimit = 1;
+		if(g_cfg.lockCamUpDeg < 10.0f) g_cfg.lockCamUpDeg = 10.0f;
+		if(g_cfg.lockCamUpDeg > 80.0f) g_cfg.lockCamUpDeg = 80.0f;
 		if(g_cfg.requireLos < 0) g_cfg.requireLos = 0;
 		if(g_cfg.requireLos > 1) g_cfg.requireLos = 1;
 		if(g_cfg.keepBleedout < 0) g_cfg.keepBleedout = 0;
@@ -817,7 +851,7 @@ namespace
 	// ------------------------------------------------------------------ linha de visao (v0.18.1)
 	// Rotina do proprio jogo (a que o Papyrus Actor.HasLOS usa): 0x008C0FA0, cdecl (viewer, alvo, bool* resultado), devolve true se correu.
 	// Faz testes de raios: so corre na thread principal. Nas outras threads responde-se pela cache, que uma tarefa da thread do jogo preenche.
-	struct LosEntry { UInt32 id; DWORD tick; int res; };
+	struct LosEntry { UInt32 id; DWORD tick; int res; DWORD seen; int logged; };
 	LosEntry		g_losCache[64];
 	UInt32			g_losPend[16];
 	volatile LONG	g_losTaskQueued = 0;
@@ -843,7 +877,8 @@ namespace
 		return r;
 	}
 
-	void LosStore(UInt32 id, int res)
+	// Devolve true se o resultado mudou desde o ultimo registado (so se escreve no log quando muda).
+	bool LosStore(UInt32 id, int res)
 	{
 		const DWORD now = GetTickCount();
 		int slot = -1; DWORD oldest = 0; int oldestAt = 0;
@@ -855,7 +890,12 @@ namespace
 			if(age >= oldest) { oldest = age; oldestAt = i; }
 		}
 		if(slot < 0) slot = oldestAt;
+		if(g_losCache[slot].id != id) { g_losCache[slot].seen = 0; g_losCache[slot].logged = 0; }
 		g_losCache[slot].id = id; g_losCache[slot].tick = now; g_losCache[slot].res = res;
+		if(res == 1) g_losCache[slot].seen = now;
+		const bool changed = (g_losCache[slot].logged != res + 1);
+		g_losCache[slot].logged = res + 1;
+		return changed;
 	}
 
 	class LosTask : public TaskDelegate
@@ -874,8 +914,7 @@ namespace
 				const int r = LosDirect(a);
 				if(r >= 0)
 				{
-					LosStore(ids[i], r);
-					if(g_losLogN < 40) { ++g_losLogN; _MESSAGE("los: %08X -> %s (game thread task)", (unsigned)ids[i], r ? "visible" : "BLOCKED"); }
+					if(LosStore(ids[i], r) && g_losLogN < 150) { ++g_losLogN; _MESSAGE("los: %08X -> %s (game thread task)", (unsigned)ids[i], r ? "visible" : "BLOCKED"); }
 				}
 			}
 			g_losTaskQueued = 0;
@@ -884,7 +923,15 @@ namespace
 	};
 
 	// 1 = ha linha de visao (ou desconhecido: nao se bloqueia), 0 = sem linha de visao.
-	int LosState(Actor * a)
+	// v0.18.2: um alvo visto ha menos de LosGraceMs nao e dado como bloqueado (encostas, arvores, curvas do terreno);
+	// wait = o lock (tecla) espera ate LosWaitMs pelo primeiro resultado, para nao escapar para tras de uma parede.
+	int LosApplyGrace(int found, const LosEntry & e, DWORD now)
+	{
+		if(found == 0 && g_cfg.losGraceMs > 0 && e.seen && (DWORD)(now - e.seen) < (DWORD)g_cfg.losGraceMs) return 1;
+		return found;
+	}
+
+	int LosState(Actor * a, bool wait = false)
 	{
 		if(!g_cfg.requireLos || !a) return 1;
 		const DWORD now = GetTickCount();
@@ -892,13 +939,13 @@ namespace
 		{
 			const int r = LosDirect(a);
 			if(r < 0) return 1;
-			LosStore(a->formID, r);
-			if(g_losLogN < 40) { ++g_losLogN; _MESSAGE("los: %08X -> %s (main thread)", (unsigned)a->formID, r ? "visible" : "BLOCKED"); }
+			if(LosStore(a->formID, r) && g_losLogN < 150) { ++g_losLogN; _MESSAGE("los: %08X -> %s (main thread)", (unsigned)a->formID, r ? "visible" : "BLOCKED"); }
+			for(int i = 0; i < 64; ++i) if(g_losCache[i].id == a->formID) return LosApplyGrace(r, g_losCache[i], now);
 			return r;
 		}
-		int found = -1; bool stale = true;
+		int found = -1; bool stale = true; int slotAt = -1;
 		for(int i = 0; i < 64; ++i)
-			if(g_losCache[i].id == a->formID) { found = g_losCache[i].res; stale = (now - g_losCache[i].tick) > 400; break; }
+			if(g_losCache[i].id == a->formID) { found = g_losCache[i].res; stale = (now - g_losCache[i].tick) > 400; slotAt = i; break; }
 		if(stale && g_taskIface)
 		{
 			bool queued = false;
@@ -908,8 +955,23 @@ namespace
 				if(InterlockedCompareExchange((volatile LONG *)&g_losPend[i], (LONG)a->formID, 0) == 0) queued = true;
 			}
 			if(queued && InterlockedExchange(&g_losTaskQueued, 1) == 0) g_taskIface->AddTask(new LosTask());
+			// primeira vez (sem resultado): espera um instante pela tarefa da thread do jogo
+			if(found < 0 && wait && g_cfg.losWaitMs > 0)
+			{
+				const DWORD t0 = GetTickCount();
+				while((DWORD)(GetTickCount() - t0) < (DWORD)g_cfg.losWaitMs)
+				{
+					Sleep(2);
+					bool got = false;
+					for(int i = 0; i < 64; ++i)
+						if(g_losCache[i].id == a->formID && (DWORD)(g_losCache[i].tick - t0) < 100000u) { found = g_losCache[i].res; slotAt = i; got = true; break; }
+					if(got) break;
+				}
+			}
 		}
-		return found < 0 ? 1 : found;
+		if(found < 0) return 1;
+		if(slotAt >= 0 && g_losCache[slotAt].id == a->formID) return LosApplyGrace(found, g_losCache[slotAt], now);
+		return found;
 	}
 
 	DWORD g_lastActorLog = 0;
@@ -1216,6 +1278,19 @@ namespace
 		return true;
 	}
 
+	// v0.18.2: encostas. O alvo conta como "perto da mira" se a diferenca HORIZONTAL cabe no angulo (a vertical ate ~80 graus):
+	// em cima ou em baixo de uma subida o angulo total passava o limite e o lock soltava ou nao voltava a prender.
+	bool YawForgive(const float * o, const float * d, const float * c, float limitRad)
+	{
+		const float vx = c[0] - o[0], vy = c[1] - o[1], vz = c[2] - o[2];
+		const float hd = sqrtf(vx * vx + vy * vy);
+		if(hd < 1.0f) return true;
+		const float dyaw = fabsf(WrapPi(atan2f(vx, vy) - atan2f(d[0], d[1])));
+		float dz = d[2]; if(dz > 1.0f) dz = 1.0f; if(dz < -1.0f) dz = -1.0f;
+		const float dEl = fabsf(atan2f(vz, hd) - asinf(dz));
+		return dyaw <= limitRad && dEl <= 1.4f;
+	}
+
 	// Atores a considerar: os da celula atual e os que o jogo lista como hostis (mesmo noutra celula).
 	int GatherActors(PlayerCharacter * player, Actor ** out, int maxN, UInt32 * hostileIds, UInt32 * hostileHandles, int * hostileCount)
 	{
@@ -1267,7 +1342,6 @@ namespace
 		const UInt32 life = Engine::LifeState(a);
 		if(life != 0 && !(g_cfg.allowReanimated && life == 4)) return false;
 		if(!a->GetNiNode()) return false;							// sem corpo carregado
-		if(LosState(a) == 0) return false;							// atras de uma parede
 		if(g_cfg.lockHostileOnly)
 		{
 			bool listed = false;
@@ -1310,7 +1384,7 @@ namespace
 				if(AngleToRay(o, d, pos.x, pos.y, pos.z + 80.0f) > acquireRad + 1.2f) continue;
 				float c[3];
 				if(!EvalBody(a, o, d, &ang, c)) continue;
-				if(ang > acquireRad) continue;
+				if(ang > acquireRad && !(g_cfg.lockVertForgive && YawForgive(o, d, c, acquireRad))) continue;
 				score = ang + dist * 0.00001f;						// empate: o mais perto
 			}
 			else
@@ -1330,7 +1404,11 @@ namespace
 				}
 			}
 
-			if(score < bestScore) { bestScore = score; best = a; bestAng = ang; }
+			if(score < bestScore)
+			{
+				if(LosState(a, true) == 0) continue;							// atras de uma parede (so testa quem ganharia)
+				bestScore = score; best = a; bestAng = ang;
+			}
 		}
 		if(outAngle) *outAngle = bestAng;
 		return best;
@@ -1495,6 +1573,43 @@ namespace
 			}
 		}
 		return false;
+	}
+
+	// v0.18.2: ha flechas / virotes equipados? (so conta como "nao" se o inventario foi lido e nao tem municao equipada)
+	bool AmmoReady(PlayerCharacter * player)
+	{
+		if(!g_cfg.noAmmoGuard) return true;
+		static DWORD s_t = 0; static bool s_v = true; static int s_last = -1;
+		const DWORD now = GetTickCount();
+		if((DWORD)(now - s_t) < 200) return s_v;
+		s_t = now;
+		bool res = true;
+		__try
+		{
+			BSExtraData * x = ((TESObjectREFR *)player)->extraData.GetByType(kExtraData_ContainerChanges);
+			ExtraContainerChanges * ecc = x ? (ExtraContainerChanges *)x : NULL;
+			if(ecc && ecc->data && ecc->data->objList)
+			{
+				int entries = 0; bool worn = false;
+				for(EntryDataList::Iterator it = ecc->data->objList->Begin(); !it.End() && entries < 2000; ++it)
+				{
+					InventoryEntryData * e = it.Get();
+					++entries;
+					if(!e || !e->type || e->type->formType != kFormType_Ammo || !e->extendDataList) continue;
+					for(ExtendDataList::Iterator j = e->extendDataList->Begin(); !j.End(); ++j)
+					{
+						BaseExtraList * b = j.Get();
+						if(b && b->HasType(kExtraData_Worn)) { worn = true; break; }
+					}
+					if(worn) break;
+				}
+				res = worn || entries == 0;			// lista vazia: nao se sabe, assume que ha
+			}
+		}
+		__except(EXCEPTION_EXECUTE_HANDLER) { res = true; }
+		s_v = res;
+		if(s_last != (res ? 1 : 0)) { s_last = res ? 1 : 0; _MESSAGE("ammo: %s", res ? "ammo equipped (or unknown)" : "NO ammo equipped - the bow does not count as aiming"); }
+		return res;
 	}
 
 	// A usar arco / besta / magia com um botao de ataque carregado? (sem funcoes do SKSE: leitura direta)
@@ -2183,6 +2298,9 @@ namespace
 	// Esta thread repoe o corpo no alvo logo (sem limite de velocidade) e, com camera livre, compensa o deslocamento da camera
 	// para ela nao mexer.
 	volatile LONG	g_fastHold = 0;
+	volatile LONG	g_sprintOn = 0;			// v0.18.2: correr com o lock: o corpo segue a direcao das teclas (a HoldThread trata disso)
+	volatile DWORD	g_sprintTick = 0;
+	DWORD			g_relTraceUntil = 0;	// v0.18.2: diagnostico depois de soltar o arco
 	float			g_ctrErrYaw = 0.0f, g_ctrErrPitch = 0.0f;	// erro (rad) entre o ponto de mira e o centro do ecra, so para o log
 	volatile DWORD	g_mouseTick = 0;		// ultimo movimento do rato (para o lock suave ceder)
 	volatile LONG	g_freeLookHeld = 0;		// tecla de olhar livremente premida
@@ -2201,13 +2319,36 @@ namespace
 				PlayerCharacter * player = Engine::Player();
 				if(!player) continue;
 				NiPoint3 & rot = Engine::Rotation(player);
-				const float diff = WrapPi(g_targetYaw - rot.z);
+				// v0.18.2: correr (Shift) com o lock: o corpo vira para a direcao das teclas relativa a camera (W = em frente na vista,
+				// A = esquerda, S = costas...); a rotacao do input passa a dar "em frente" e o personagem corre nessa direcao.
+				// Ao largar o Shift o corpo volta ao alvo, a uma velocidade limitada.
+				static bool s_wasSprint = false; static DWORD s_relUntil = 0, s_lastT = 0;
+				const DWORD tn = GetTickCount();
+				const bool sprintNow = g_sprintOn && (DWORD)(tn - g_sprintTick) <= 120;
+				if(s_wasSprint && !sprintNow) s_relUntil = tn + 350;
+				s_wasSprint = sprintNow;
+				float wantYaw = g_targetYaw;
+				if(sprintNow)
+				{
+					const float skx = (g_kRight ? 1.0f : 0.0f) - (g_kLeft ? 1.0f : 0.0f), sky = (g_kFwd ? 1.0f : 0.0f) - (g_kBack ? 1.0f : 0.0f);
+					float so[3], sd[3];
+					if((skx != 0.0f || sky != 0.0f) && CameraRay(player, so, sd)) wantYaw = WrapPi(atan2f(sd[0], sd[1]) + atan2f(skx, sky));
+				}
+				const float diff = WrapPi(wantYaw - rot.z);
 				++g_holdTicks;
+				float lim = 0.7f;
+				if(sprintNow || (LONG)(s_relUntil - tn) > 0)
+				{
+					float dts = (s_lastT && tn > s_lastT) ? (tn - s_lastT) / 1000.0f : 0.002f;
+					if(dts > 0.05f) dts = 0.05f;
+					lim = 12.0f * dts; if(lim < 0.012f) lim = 0.012f;
+				}
+				s_lastT = tn;
 				if(fabsf(diff) < 0.002f) continue;
 				++g_holdFixes;
 				float step = diff;
-				if(step >  0.7f) step =  0.7f;
-				if(step < -0.7f) step = -0.7f;
+				if(step >  lim) step =  lim;
+				if(step < -lim) step = -lim;
 				if(g_cfg.cameraHoldTdm)
 				{
 					UInt8 * hcs = ThirdPersonStatePtr();
@@ -2223,7 +2364,48 @@ namespace
 	// Arco / besta a ser puxado (so ai o Coeus compensa a camera por si; com magia a compensacao e nossa).
 	bool BowAiming(PlayerCharacter * player)
 	{
-		return (g_holdLeft || g_holdRight) && BowEquipped(player);
+		return (g_holdLeft || g_holdRight) && BowEquipped(player) && AmmoReady(player);
+	}
+
+	// v0.18.2: camera de 3a pessoa com o lock. Limita o olhar para cima (camera ao chao / a entrar na 1a pessoa por colisao)
+	// e regista 3 s de diagnostico depois de ligar o lock (estado da camera, distancia, inclinacao).
+	void LockCamGuard(PlayerCharacter * player, DWORD now, bool apply)
+	{
+		static bool s_prev = false; static DWORD s_t0 = 0, s_last = 0; static int s_logs = 0; static int s_clampLogs = 0;
+		const bool on = g_lockOwn != 0;
+		if(on && !s_prev) { s_t0 = now; s_last = 0; }
+		s_prev = on;
+		if(!on) return;
+		__try
+		{
+			UInt8 * cs = ThirdPersonStatePtr();
+			if(cs && apply && g_cfg.lockCamLimit)
+			{
+				const float up = g_cfg.lockCamUpDeg * kPi / 180.0f;
+				float cp = *(float *)(cs + 0x54);
+				if(cp < -up)
+				{
+					if(s_clampLogs < 20) { ++s_clampLogs; _MESSAGE("lockcam: camera pitch %.1f deg looks too far up - limited to %.0f deg", cp * 57.2958f, -g_cfg.lockCamUpDeg); }
+					*(float *)(cs + 0x54) = -up; *(float *)(cs + 0x58) = -up;
+				}
+			}
+			if((DWORD)(now - s_t0) < 3000 && (DWORD)(now - s_last) >= 100 && s_logs < 300)
+			{
+				s_last = now; ++s_logs;
+				PlayerCamera * cam = PlayerCamera::GetSingleton();
+				float camDist = -1.0f;
+				if(cam && cam->cameraNode)
+				{
+					const NiPoint3 pp = Engine::Position(player);
+					const NiPoint3 cp2 = cam->cameraNode->m_worldTransform.pos;
+					camDist = sqrtf((pp.x - cp2.x) * (pp.x - cp2.x) + (pp.y - cp2.y) * (pp.y - cp2.y) + (pp.z - cp2.z) * (pp.z - cp2.z));
+				}
+				_MESSAGE("lockcam: +%lu ms state=%u camDist=%.0f | camera pitch %.1f deg offset %.2f | body pitch %.1f deg",
+						 (unsigned long)(now - s_t0), (cam && cam->cameraState) ? (unsigned)cam->cameraState->stateId : 0xFFFFu, camDist,
+						 cs ? *(float *)(cs + 0x54) * 57.2958f : 0.0f, cs ? *(float *)(cs + 0xAC) : 0.0f, Engine::Rotation(player).x * 57.2958f);
+			}
+		}
+		__except(EXCEPTION_EXECUTE_HANDLER) { }
 	}
 
 	// Ajuste manual da altura do ponto de mira (unidades); fica gravado no ini.
@@ -2347,8 +2529,10 @@ namespace
 			if(CameraRay(player, o, d))
 			{
 				float ang = kPi, c[3];
+				bool evOk = false;
 				if(EvalBody(a, o, d, &ang, c))
 				{
+					evOk = true;
 					// Filtro: braços e arma do alvo mexem a cada golpe; a camera nao deve ir atras disso.
 					const float nx = c[0] - pos.x, ny = c[1] - pos.y, nz = c[2] - pos.z;
 					if(g_lockOffId != a->formID || g_cfg.aimFilterMs < 1.0f)
@@ -2364,7 +2548,8 @@ namespace
 						g_lockOff[2] += (nz - g_lockOff[2]) * al;
 					}
 				}
-				const bool visible = ang <= g_cfg.lockLoseAngleDeg * kPi / 180.0f;
+				const float loseRad = g_cfg.lockLoseAngleDeg * kPi / 180.0f;
+				const bool visible = (ang <= loseRad) || (evOk && g_cfg.lockVertForgive && YawForgive(o, d, c, loseRad));
 				if(visible) g_lockLostSince = 0;
 				else if(!g_lockLostSince) g_lockLostSince = now;
 				else if((LONG)(now - g_lockLostSince) > g_cfg.lockLoseSightMs)
@@ -3367,7 +3552,18 @@ namespace
 			// Vista com o lock (FreeCam, primeira pessoa e arco na mao). Modo 2 = duro: a vista fica sempre no alvo e o rato e ignorado;
 			// modo 1 = suave: o rato e livre e o lock toma o controlo total enquanto se ataca; tecla de olhar livremente liberta a vista.
 			const bool softFP = IsFirstPerson();
-			const bool bowDrawing = g_cfg.bowLockCamera && BowAiming(player);
+			// v0.18.2: cauda de soltura. Ao soltar a flecha o corpo/camera mantem o comportamento de "puxando" durante BowReleaseTailMs.
+			const bool bowRaw = g_cfg.bowLockCamera && BowAiming(player);
+			static bool s_prevRaw = false; static DWORD s_tailUntil = 0;
+			if(bowRaw) s_tailUntil = 0;
+			else if(s_prevRaw && g_lockOwn)
+			{
+				if(g_cfg.bowReleaseTailMs > 0) s_tailUntil = now + (DWORD)g_cfg.bowReleaseTailMs;
+				g_relTraceUntil = now + 800;
+				_MESSAGE("bowrelease: arrow released (tail %d ms)", g_cfg.bowReleaseTailMs);
+			}
+			s_prevRaw = bowRaw;
+			const bool bowDrawing = bowRaw || (!bowRaw && (LONG)(s_tailUntil - now) > 0);
 			const bool softBow = g_cfg.bowLockCamera && !softFP && (bowDrawing || BowEquipped(player));
 			const bool viewCtl = coeusProfile && g_cfg.lockViewMode > 0 && g_lockOwn && (softFP || softBow);
 			bool viewHard = false;
@@ -3416,12 +3612,30 @@ namespace
 					_MESSAGE("center: %s | aim point vs screen centre: yaw %.2f deg, pitch %.2f deg", softFP ? "first person" : (bowDrawing ? "bow" : "bow-ready (not drawing)"), g_ctrErrYaw * 57.2958f, g_ctrErrPitch * 57.2958f);
 				}
 			}
+			{
+				static DWORD s_trRel = 0;
+				if((LONG)(g_relTraceUntil - now) > 0 && (DWORD)(now - s_trRel) >= 60)
+				{
+					s_trRel = now;
+					UInt8 * rcs = ThirdPersonStatePtr();
+					_MESSAGE("releasetrace: %ld ms left | aim vs centre yaw %.2f deg | body yaw %.2f | camera yaw %.2f offset %.2f | remap=%d tail=%d",
+							 (long)(g_relTraceUntil - now), g_ctrErrYaw * 57.2958f, Engine::Rotation(player).z * 57.2958f,
+							 rcs ? *(float *)(rcs + 0x5C) * 57.2958f : 0.0f, rcs ? *(float *)(rcs + 0xAC) * 57.2958f : 0.0f, (int)g_mvWant, (!bowRaw && bowDrawing) ? 1 : 0);
+				}
+			}
 			__try { ShoulderTick(player, dt, now); }
 			__except(EXCEPTION_EXECUTE_HANDLER) { g_shOn = false; }
 
 			// Com a rotacao do input a andar, quem prende o corpo ao alvo e a HoldThread (rapida); esta thread so trata do resto.
 			const bool fastHold = (g_mvWant != 0) && !sprintHold;
 			g_fastHold = fastHold ? 1 : 0;
+			{
+				// v0.18.2: sprint livre com o lock (perfil FreeCam): so com a rotacao do input ativa, fora da mira com arco / 1a pessoa.
+				const bool sprintFree = g_cfg.sprintFreeBody && coeusProfile && g_lockOwn && g_shiftHeld && g_moveHeld && g_mvWant && !(viewCtl && (softFP || bowDrawing));
+				static bool s_prevSprint = false;
+				if(sprintFree != s_prevSprint) { s_prevSprint = sprintFree; _MESSAGE("sprint: free body %s (lock on, Shift %d, move %d)", sprintFree ? "ON" : "OFF", (int)g_shiftHeld, (int)g_moveHeld); }
+				g_sprintOn = sprintFree ? 1 : 0; g_sprintTick = now;
+			}
 			g_fastHoldTick = now;
 
 			NiPoint3 & rot = Engine::Rotation(player);
@@ -3430,6 +3644,7 @@ namespace
 			const float vSign = g_cfg.verticalInvert ? -1.0f : 1.0f;
 			const bool returnAllowed = g_cfg.returnToHeading && !coeusProfile;
 			const bool firstPerson = IsFirstPerson();
+			LockCamGuard(player, now, !firstPerson && !viewCtl);
 			{
 				// v0.17.0: ao sair da 1a pessoa sem lock nem arco, a inclinacao do corpo (vista para cima/baixo) volta ao nivel em ~350 ms.
 				static bool s_prevFP = false; static DWORD s_levelUntil = 0;
