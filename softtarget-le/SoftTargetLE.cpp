@@ -35,7 +35,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.18.0 (ponto do alvo com a projecao exacta do proprio jogo (NiCamera); guarda: nao mexe quando o motor controla o jogador)"
+#define PLUGIN_VERSION_STR	"0.18.1 (linha de visao para escolher alvos; alvo em bleedout mantem-se; diagnostico do pitch no Hard com arco)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -44,6 +44,7 @@ static PluginHandle				g_pluginHandle	= kPluginHandle_Invalid;
 static SKSEMessagingInterface *	g_messaging		= NULL;
 static SKSEPapyrusInterface *	g_papyrus		= NULL;
 static SKSETaskInterface *		g_taskIface		= NULL;
+static DWORD					g_mainTid		= 0;		// thread principal do jogo (a que carrega o plugin)
 
 // LookupREFRByHandle e CreateRefHandleByREFR vem agora do GameReferences.cpp do SKSE (compilado no projeto).
 
@@ -120,6 +121,8 @@ namespace
 		float	dotSize;		// tamanho, % (100 = normal)
 		int		dotColor;		// 0 branco, 1 vermelho, 2 amarelo, 3 ciano, 4 verde, 5 laranja
 		float	dotOpacity;		// opacidade, %
+		int		requireLos;			// 1 = nao escolhe alvos sem linha de visao (atras de paredes)
+		int		keepBleedout;		// 1 = o alvo ja preso mantem-se enquanto estiver em bleedout / caido (ate morrer de verdade)
 		int		dotExact;			// 1 = o ponto usa a projeccao exacta da camera do jogo (NiCamera), senao a estimativa pelo FOV
 		int		aiGuard;			// 1 = nao mexe no corpo/camera quando o motor controla o jogador (cenas, scripts)
 		int		dotTdmType;		// tipo da reticula do TDM (0..2)
@@ -224,7 +227,7 @@ namespace
 		{ "PredictAlways",			'i', &g_cfg.predictAlways,		1.0f },
 		{ "LockTiltAlways",			'i', &g_cfg.lockTiltAlways,		1.0f },
 		{ "ProjectileSpeed",		'f', &g_cfg.projectileSpeed,	4500.0f },
-		{ "ProjectileGravity",		'f', &g_cfg.projectileGravity,	470.0f },
+		{ "ProjectileGravity",		'f', &g_cfg.projectileGravity,	50.0f },
 		{ "PredictStrength",		'f', &g_cfg.predictStrength,	100.0f },
 		{ "PredictMinDistance",		'f', &g_cfg.predictMinDist,		150.0f },
 		{ "LockCameraAxis",			'i', &g_cfg.lockCameraAxis,		1.0f },
@@ -238,6 +241,8 @@ namespace
 		{ "DotSize",				'f', &g_cfg.dotSize,			100.0f },
 		{ "DotColor",				'i', &g_cfg.dotColor,			0.0f },
 		{ "DotOpacity",				'f', &g_cfg.dotOpacity,			100.0f },
+		{ "RequireLineOfSight",		'i', &g_cfg.requireLos,		1.0f },
+		{ "KeepBleedoutTarget",		'i', &g_cfg.keepBleedout,		1.0f },
 		{ "DotExactProject",		'i', &g_cfg.dotExact,			1.0f },
 		{ "AiDrivenGuard",			'i', &g_cfg.aiGuard,			1.0f },
 		{ "DotTdmType",				'i', &g_cfg.dotTdmType,			1.0f },
@@ -439,6 +444,10 @@ namespace
 		if(g_cfg.dotSize > 400.0f)			g_cfg.dotSize = 400.0f;
 		if(g_cfg.dotOpacity < 10.0f)		g_cfg.dotOpacity = 10.0f;
 		if(g_cfg.dotOpacity > 100.0f)		g_cfg.dotOpacity = 100.0f;
+		if(g_cfg.requireLos < 0) g_cfg.requireLos = 0;
+		if(g_cfg.requireLos > 1) g_cfg.requireLos = 1;
+		if(g_cfg.keepBleedout < 0) g_cfg.keepBleedout = 0;
+		if(g_cfg.keepBleedout > 1) g_cfg.keepBleedout = 1;
 		if(g_cfg.dotExact < 0) g_cfg.dotExact = 0;
 		if(g_cfg.dotExact > 1) g_cfg.dotExact = 1;
 		if(g_cfg.aiGuard < 0) g_cfg.aiGuard = 0;
@@ -805,6 +814,104 @@ namespace
 		return n;
 	}
 
+	// ------------------------------------------------------------------ linha de visao (v0.18.1)
+	// Rotina do proprio jogo (a que o Papyrus Actor.HasLOS usa): 0x008C0FA0, cdecl (viewer, alvo, bool* resultado), devolve true se correu.
+	// Faz testes de raios: so corre na thread principal. Nas outras threads responde-se pela cache, que uma tarefa da thread do jogo preenche.
+	struct LosEntry { UInt32 id; DWORD tick; int res; };
+	LosEntry		g_losCache[64];
+	UInt32			g_losPend[16];
+	volatile LONG	g_losTaskQueued = 0;
+	int				g_losLogN = 0;
+	bool			g_snapReset = false;				// pedido para refazer as leituras de camera do arco (inicio da puxada)
+	DWORD			g_drawTraceUntil = 0;				// diagnostico: regista o erro de mira logo apos o inicio da puxada
+	typedef bool (__cdecl * HasLosFn)(Actor * viewer, TESObjectREFR * target, bool * result);
+
+	int LosDirect(Actor * a)
+	{
+		int r = -1;
+		__try
+		{
+			PlayerCharacter * p = Engine::Player();
+			if(p && a)
+			{
+				bool res = false;
+				HasLosFn fn = (HasLosFn)0x008C0FA0;
+				if(fn((Actor *)p, (TESObjectREFR *)a, &res)) r = res ? 1 : 0;
+			}
+		}
+		__except(EXCEPTION_EXECUTE_HANDLER) { r = -1; }
+		return r;
+	}
+
+	void LosStore(UInt32 id, int res)
+	{
+		const DWORD now = GetTickCount();
+		int slot = -1; DWORD oldest = 0; int oldestAt = 0;
+		for(int i = 0; i < 64; ++i)
+		{
+			if(g_losCache[i].id == id) { slot = i; break; }
+			const DWORD age = now - g_losCache[i].tick;
+			if(g_losCache[i].id == 0) { slot = i; break; }
+			if(age >= oldest) { oldest = age; oldestAt = i; }
+		}
+		if(slot < 0) slot = oldestAt;
+		g_losCache[slot].id = id; g_losCache[slot].tick = now; g_losCache[slot].res = res;
+	}
+
+	class LosTask : public TaskDelegate
+	{
+	public:
+		virtual void Run(void)
+		{
+			UInt32 ids[16]; int n = 0;
+			for(int i = 0; i < 16; ++i) { const UInt32 v = (UInt32)InterlockedExchange((volatile LONG *)&g_losPend[i], 0); if(v) ids[n++] = v; }
+			for(int i = 0; i < n && i < 8; ++i)
+			{
+				TESForm * f = LookupFormByID(ids[i]);
+				if(!f || f->formType != kFormType_Character) continue;
+				Actor * a = DYNAMIC_CAST(f, TESForm, Actor);
+				if(!a) continue;
+				const int r = LosDirect(a);
+				if(r >= 0)
+				{
+					LosStore(ids[i], r);
+					if(g_losLogN < 40) { ++g_losLogN; _MESSAGE("los: %08X -> %s (game thread task)", (unsigned)ids[i], r ? "visible" : "BLOCKED"); }
+				}
+			}
+			g_losTaskQueued = 0;
+		}
+		virtual void Dispose(void) { delete this; }
+	};
+
+	// 1 = ha linha de visao (ou desconhecido: nao se bloqueia), 0 = sem linha de visao.
+	int LosState(Actor * a)
+	{
+		if(!g_cfg.requireLos || !a) return 1;
+		const DWORD now = GetTickCount();
+		if(g_mainTid && GetCurrentThreadId() == g_mainTid)
+		{
+			const int r = LosDirect(a);
+			if(r < 0) return 1;
+			LosStore(a->formID, r);
+			if(g_losLogN < 40) { ++g_losLogN; _MESSAGE("los: %08X -> %s (main thread)", (unsigned)a->formID, r ? "visible" : "BLOCKED"); }
+			return r;
+		}
+		int found = -1; bool stale = true;
+		for(int i = 0; i < 64; ++i)
+			if(g_losCache[i].id == a->formID) { found = g_losCache[i].res; stale = (now - g_losCache[i].tick) > 400; break; }
+		if(stale && g_taskIface)
+		{
+			bool queued = false;
+			for(int i = 0; i < 16 && !queued; ++i)
+			{
+				if(g_losPend[i] == a->formID) { queued = true; break; }
+				if(InterlockedCompareExchange((volatile LONG *)&g_losPend[i], (LONG)a->formID, 0) == 0) queued = true;
+			}
+			if(queued && InterlockedExchange(&g_losTaskQueued, 1) == 0) g_taskIface->AddTask(new LosTask());
+		}
+		return found < 0 ? 1 : found;
+	}
+
 	DWORD g_lastActorLog = 0;
 
 	// Devolve true se encontrou um alvo; escreve a guinada, a inclinacao (positiva = para cima),
@@ -867,7 +974,7 @@ namespace
 			const bool hostile = listed || CALL_MEMBER_FN(actor, IsHostileToActor)(player);
 
 			// Vivos (0) ou, se permitido, em "reanimacao" (4); o resto (morto, a morrer, inconsciente...) nao.
-			if(life != 0 && !(g_cfg.allowReanimated && life == 4)) continue;
+			if(life != 0 && !(g_cfg.allowReanimated && life == 4) && !(g_cfg.keepBleedout && (life == 7 || life == 8) && actor->formID == g_lastTargetId)) continue;
 			if(!hostile) continue;
 			if(g_cfg.requireCombat && !listed && !actor->IsInCombat()) continue;
 
@@ -926,6 +1033,7 @@ namespace
 
 			if(score < bestScore)
 			{
+				if(LosState(actor) == 0) continue;			// atras de uma parede
 				bestScore = score;
 				bestActor = actor;
 				bestListed = listedAt;
@@ -1159,6 +1267,7 @@ namespace
 		const UInt32 life = Engine::LifeState(a);
 		if(life != 0 && !(g_cfg.allowReanimated && life == 4)) return false;
 		if(!a->GetNiNode()) return false;							// sem corpo carregado
+		if(LosState(a) == 0) return false;							// atras de uma parede
 		if(g_cfg.lockHostileOnly)
 		{
 			bool listed = false;
@@ -2216,7 +2325,13 @@ namespace
 		if(!a || a->formID != (UInt32)g_lockId) { g_lockActor = NULL; return; }
 
 		const UInt32 life = Engine::LifeState(a);
-		if(life != 0 && !(g_cfg.allowReanimated && life == 4)) { LockLoseOrNext(player, "target died"); return; }
+		{
+			static UInt32 s_lastLife = 0xFFFF; static int s_lifeLogN = 0;
+			if(life != s_lastLife) { s_lastLife = life; if(s_lifeLogN < 30) { ++s_lifeLogN; _MESSAGE("lock: target %08X life state is now %u", (unsigned)a->formID, (unsigned)life); } }
+		}
+		// v0.18.1: em bleedout / caido (estados 7 e 8) o alvo mantem-se: ainda esta vivo e pode levantar-se.
+		const bool downedKeep = g_cfg.keepBleedout && (life == 7 || life == 8);
+		if(life != 0 && !(g_cfg.allowReanimated && life == 4) && !downedKeep) { LockLoseOrNext(player, "target died"); return; }
 
 		const NiPoint3 pos = Engine::Position(a);
 		const NiPoint3 me = Engine::Position(player);
@@ -3295,10 +3410,10 @@ namespace
 				static DWORD s_lastCtr = 0; static int s_stallLogs = 0, s_ctrLogs = 0;
 				if(g_perfLast && (now - g_perfLast) > 150 && s_stallLogs < 40) { ++s_stallLogs; _MESSAGE("perf: SoftTarget thread stalled %lu ms", (unsigned long)(now - g_perfLast)); }
 				g_perfLast = now;
-				if(g_lockOwn && (softFP || bowDrawing) && (now - s_lastCtr) > 500 && s_ctrLogs < 400)
+				if(g_lockOwn && (softFP || bowDrawing || (viewCtl && softBow)) && (now - s_lastCtr) > 500 && s_ctrLogs < 600)
 				{
 					s_lastCtr = now; ++s_ctrLogs;
-					_MESSAGE("center: %s | aim point vs screen centre: yaw %.2f deg, pitch %.2f deg", softFP ? "first person" : "bow", g_ctrErrYaw * 57.2958f, g_ctrErrPitch * 57.2958f);
+					_MESSAGE("center: %s | aim point vs screen centre: yaw %.2f deg, pitch %.2f deg", softFP ? "first person" : (bowDrawing ? "bow" : "bow-ready (not drawing)"), g_ctrErrYaw * 57.2958f, g_ctrErrPitch * 57.2958f);
 				}
 			}
 			__try { ShoulderTick(player, dt, now); }
@@ -3504,7 +3619,7 @@ namespace
 								// ao puxar o arco (jogo/Coeus) nao faz a correcao correr atras de si propria, e pode corrigir-se a cada ms sem pausas.
 								static float s_ray = 1000.0f, s_r0 = 0.0f, s_rot0 = 0.0f, s_off0 = 0.0f; static bool s_have = false;
 								static bool s_prevDraw = false;
-								if(bowDrawing && !s_prevDraw) _MESSAGE("bowdraw: before drawing the aim point was %.1f deg (yaw) / %.1f deg (pitch) from the screen centre", g_ctrErrYaw * 57.2958f, g_ctrErrPitch * 57.2958f);
+								if(bowDrawing && !s_prevDraw) { _MESSAGE("bowdraw: before drawing the aim point was %.1f deg (yaw) / %.1f deg (pitch) from the screen centre", g_ctrErrYaw * 57.2958f, g_ctrErrPitch * 57.2958f); g_drawTraceUntil = now + 700; g_snapReset = true; s_have = false; }
 								s_prevDraw = bowDrawing;
 								float o3[3], d3[3];
 								if(CameraRay(player, o3, d3))
@@ -3539,10 +3654,19 @@ namespace
 								static float s_rayU = 1000.0f, s_ru0 = 0.0f, s_cp0 = 0.0f; static bool s_haveP = false;
 								const float hr = sqrtf(dd[0] * dd[0] + dd[1] * dd[1]);
 								const float rayUp = atan2f(dd[2], hr > 0.0001f ? hr : 0.0001f);
+								if(g_snapReset) { s_haveP = false; g_snapReset = false; }
 								if(!s_haveP || fabsf(rayUp - s_rayU) >= 0.00002f) { s_rayU = rayUp; s_ru0 = rayUp; s_cp0 = cp; s_haveP = true; }
 								const float predUp = s_ru0 - (cp - s_cp0);
 								const float aimUp = -want;
 								g_ctrErrPitch = aimUp - predUp;
+								{
+									static DWORD s_trLast = 0;
+									if((LONG)(g_drawTraceUntil - now) > 0 && (DWORD)(now - s_trLast) >= 60)
+									{
+										s_trLast = now;
+										_MESSAGE("drawtrace: %ld ms before the end | aim vs centre: pitch %.2f deg (ray elevation %.2f, camera pitch %.2f, aim elevation %.2f)", (long)(g_drawTraceUntil - now), g_ctrErrPitch * 57.2958f, rayUp * 57.2958f, cp * 57.2958f, aimUp * 57.2958f);
+									}
+								}
 								want = cp - (aimUp - predUp);
 							}
 							else want += g_cfg.aimOffY * kPi / 180.0f;		// alvo acima do centro = camera um pouco mais para baixo
@@ -4011,6 +4135,7 @@ bool SKSEPlugin_Load(const SKSEInterface * skse)
 		return false;
 	}
 
+	g_mainTid = GetCurrentThreadId();
 	g_taskIface = (SKSETaskInterface *)skse->QueryInterface(kInterface_Task);
 	_MESSAGE("task interface: %s", g_taskIface ? "available (the on-screen dot can be drawn)" : "NOT available (no on-screen dot)");
 
