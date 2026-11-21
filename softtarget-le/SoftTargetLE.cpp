@@ -30,11 +30,12 @@
 
 #include <shlobj.h>
 #include <math.h>
+#include <float.h>
 #include <string.h>
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.17.1 (mascara Keytrace tambem para o Themis/OAR: rotina interna MagicTarget::HasMagicEffect; postura do corpo nivela ao sair da 1a pessoa)"
+#define PLUGIN_VERSION_STR	"0.18.0 (ponto do alvo com a projecao exacta do proprio jogo (NiCamera); guarda: nao mexe quando o motor controla o jogador)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -119,6 +120,8 @@ namespace
 		float	dotSize;		// tamanho, % (100 = normal)
 		int		dotColor;		// 0 branco, 1 vermelho, 2 amarelo, 3 ciano, 4 verde, 5 laranja
 		float	dotOpacity;		// opacidade, %
+		int		dotExact;			// 1 = o ponto usa a projeccao exacta da camera do jogo (NiCamera), senao a estimativa pelo FOV
+		int		aiGuard;			// 1 = nao mexe no corpo/camera quando o motor controla o jogador (cenas, scripts)
 		int		dotTdmType;		// tipo da reticula do TDM (0..2)
 		// ---- v0.12.3
 		int		moveRemap;		// perfil FreeCam: o corpo encara o alvo e o input de andar e rodado para continuar relativo ao ecra
@@ -235,6 +238,8 @@ namespace
 		{ "DotSize",				'f', &g_cfg.dotSize,			100.0f },
 		{ "DotColor",				'i', &g_cfg.dotColor,			0.0f },
 		{ "DotOpacity",				'f', &g_cfg.dotOpacity,			100.0f },
+		{ "DotExactProject",		'i', &g_cfg.dotExact,			1.0f },
+		{ "AiDrivenGuard",			'i', &g_cfg.aiGuard,			1.0f },
 		{ "DotTdmType",				'i', &g_cfg.dotTdmType,			1.0f },
 		{ "MoveRemap",				'i', &g_cfg.moveRemap,			1.0f },
 		{ "SprintKeepsAim",			'i', &g_cfg.sprintKeepsAim,		1.0f },
@@ -434,6 +439,10 @@ namespace
 		if(g_cfg.dotSize > 400.0f)			g_cfg.dotSize = 400.0f;
 		if(g_cfg.dotOpacity < 10.0f)		g_cfg.dotOpacity = 10.0f;
 		if(g_cfg.dotOpacity > 100.0f)		g_cfg.dotOpacity = 100.0f;
+		if(g_cfg.dotExact < 0) g_cfg.dotExact = 0;
+		if(g_cfg.dotExact > 1) g_cfg.dotExact = 1;
+		if(g_cfg.aiGuard < 0) g_cfg.aiGuard = 0;
+		if(g_cfg.aiGuard > 1) g_cfg.aiGuard = 1;
 		if(g_cfg.dotTdmType < 0 || g_cfg.dotTdmType > 2) g_cfg.dotTdmType = 0;
 
 		if(g_cfg.updateMs < 1)		g_cfg.updateMs = 1;
@@ -1274,6 +1283,42 @@ namespace
 		}
 		__except(EXCEPTION_EXECUTE_HANDLER) { }
 		return false;
+	}
+
+	// v0.18.0: o motor controla o jogador (cenas, pacotes de script, mobilia...): o mod nao escreve rotacao nem camera.
+	// Mapeamento exacto do LE 1.9.32 (o mesmo que o TDM/Coeus usam): jogador+0x726 bit 0x08, ou controlador de movimento (+0xD0) com o byte +0xE9 a zero.
+	bool PlayerAIDriven()
+	{
+		bool r = false;
+		__try
+		{
+			PlayerCharacter * p = Engine::Player();
+			if(p)
+			{
+				if((*(const UInt8 *)((const UInt8 *)p + 0x726)) & 0x08) r = true;
+				else
+				{
+					const void * mc = *(void * const *)((const UInt8 *)p + 0xD0);
+					if(mc && *(const UInt8 *)((const UInt8 *)mc + 0xE9) == 0) r = true;
+				}
+			}
+		}
+		__except(EXCEPTION_EXECUTE_HANDLER) { r = false; }
+		return r;
+	}
+	bool AIDrivenCached()
+	{
+		if(!g_cfg.aiGuard) return false;
+		static DWORD t = 0; static bool v = false; static int logN = 0;
+		const DWORD n = GetTickCount();
+		if(n - t >= 100)
+		{
+			t = n;
+			const bool nv = PlayerAIDriven();
+			if(nv != v && logN < 12) { ++logN; _MESSAGE("guard: player %s by the game engine", nv ? "is now controlled" : "is back under player control"); }
+			v = nv;
+		}
+		return v;
 	}
 
 	// v0.16.2: o mod so age com um jogo carregado (save ou jogo novo) e nunca mexe na camera/corpo com um menu aberto.
@@ -2488,12 +2533,101 @@ namespace
 		return false;
 	}
 
+	// v0.18.0: a NiCamera do jogo reconhece-se pela tabela virtual (0x01117CFC), sem depender do RTTI do SKSE (que falhava).
+	const UInt32 kNiCameraVtbl = 0x01117CFC;
+	NiAVObject * FindNiCameraIn(NiAVObject * o, int depth)
+	{
+		if(!o) return NULL;
+		if(*(const UInt32 *)o == kNiCameraVtbl) return o;
+		if(depth >= 3) return NULL;
+		NiNode * nd = o->GetAsNiNode();
+		if(!nd) return NULL;
+		const NiTArray<NiAVObject *> & ch = nd->m_children;
+		for(UInt16 i = 0; i < ch.m_emptyRunStart && i < 16; ++i)
+		{
+			NiAVObject * f = FindNiCameraIn(ch.m_data[i], depth + 1);
+			if(f) return f;
+		}
+		return NULL;
+	}
+
+	void DotCameraProbeOnce(PlayerCamera * cam)
+	{
+		static bool done = false;
+		if(done) return;
+		done = true;
+		__try
+		{
+			NiNode * n = cam ? cam->cameraNode : NULL;
+			if(!n) { _MESSAGE("dot-probe: cameraNode is NULL"); return; }
+			const NiTArray<NiAVObject *> & ch = n->m_children;
+			_MESSAGE("dot-probe: cameraNode=%p vtbl=%08X children=%d", (void *)n, (unsigned)*(const UInt32 *)n, (int)ch.m_emptyRunStart);
+			for(UInt16 i = 0; i < ch.m_emptyRunStart && i < 8; ++i)
+			{
+				NiAVObject * c = ch.m_data[i];
+				if(!c) { _MESSAGE("dot-probe: child %d = NULL", (int)i); continue; }
+				const float * f = (const float *)((const UInt8 *)c + 0xE8);
+				_MESSAGE("dot-probe: child %d = %p vtbl=%08X frustum(L,R,T,B,N)=(%.3f,%.3f,%.3f,%.3f,%.3f)", (int)i, (void *)c, (unsigned)*(const UInt32 *)c, f[0], f[1], f[2], f[3], f[4]);
+			}
+		}
+		__except(EXCEPTION_EXECUTE_HANDLER) { _MESSAGE("dot-probe: fault while probing the camera node"); }
+	}
+
+	// Projeccao exacta com a rotina do proprio jogo (0x00AB84C0): matriz mundo->camara (+0xA8) e viewport (+0x10C) da NiCamera.
+	// Devolve coordenadas normalizadas (-1..1), x para a direita e y para cima.
+	typedef bool (__cdecl * NiWorldToScreenFn)(const float * worldToCam, const float * port, const float * in, float * xOut, float * yOut, float * zOut, float tol);
+	const UInt32 kNiWorldToScreenAddr = 0x00AB84C0;
+	bool ExactNdc(float wx, float wy, float wz, float * ndcX, float * ndcY)
+	{
+		bool ok = false;
+		__try
+		{
+			PlayerCamera * cam = PlayerCamera::GetSingleton();
+			if(cam && cam->cameraNode)
+			{
+				DotCameraProbeOnce(cam);
+				NiAVObject * nc = FindNiCameraIn((NiAVObject *)cam->cameraNode, 0);
+				if(nc)
+				{
+					const float * m = (const float *)((const UInt8 *)nc + 0xA8);
+					const float * p = (const float *)((const UInt8 *)nc + 0x10C);		// left, right, top, bottom
+					bool sane = (p[1] > p[0] && p[2] > p[3]);
+					for(int i = 0; i < 16 && sane; ++i) if(!_finite(m[i])) sane = false;
+					if(sane)
+					{
+						const float in[3] = { wx, wy, wz };
+						float x = 0.0f, y = 0.0f, z = 0.0f;
+						NiWorldToScreenFn fn = (NiWorldToScreenFn)kNiWorldToScreenAddr;
+						if(fn(m, p, in, &x, &y, &z, 1e-5f) && _finite(x) && _finite(y))
+						{
+							*ndcX = (x - 0.5f * (p[0] + p[1])) / (0.5f * (p[1] - p[0]));
+							*ndcY = (y - 0.5f * (p[2] + p[3])) / (0.5f * (p[2] - p[3]));
+							ok = true;
+						}
+					}
+				}
+			}
+		}
+		__except(EXCEPTION_EXECUTE_HANDLER) { ok = false; }
+		return ok;
+	}
+
 	// Tangentes do meio-campo de visao (horizontal e vertical), do frustum da NiCamera; reserva: worldFOV.
 	bool CameraTan(float * tanH, float * tanV)
 	{
 		PlayerCamera * cam = PlayerCamera::GetSingleton();
 		if(!cam || !cam->cameraNode) return false;
 		NiNode * n = cam->cameraNode;
+		{
+			NiAVObject * vc = FindNiCameraIn((NiAVObject *)n, 0);
+			float h = 0.0f, v = 0.0f;
+			if(vc && FrustumRaw(vc, &h, &v))
+			{
+				*tanH = h; *tanV = v;
+				if(!g_dot.loggedFrustum) { g_dot.loggedFrustum = true; _MESSAGE("dot: NiCamera found by vtable, frustum tanH %.3f tanV %.3f (h-fov %.1f deg, v-fov %.1f deg)", h, v, 2.0f * atanf(h) * 180.0f / kPi, 2.0f * atanf(v) * 180.0f / kPi); }
+				return true;
+			}
+		}
 		{
 			// 1) leitura direta: o proprio no e cada filho (a NiCamera costuma ser o 1o filho)
 			float h = 0.0f, v = 0.0f;
@@ -2561,6 +2695,25 @@ namespace
 		*ndcX = x / (z * tH);
 		*ndcY = y / (z * tV);
 		*dist = sqrtf(vx * vx + vy * vy + vz * vz);
+		if(g_cfg.dotExact)
+		{
+			float ex = 0.0f, ey = 0.0f;
+			if(ExactNdc(wx, wy, wz, &ex, &ey))
+			{
+				// Confere o sentido dos eixos contra a estimativa (so quando o ponto esta longe do centro) e corrige se vier invertido.
+				static int sAgreeX = 0, sDisX = 0, sAgreeY = 0, sDisY = 0;
+				static bool sFlipX = false, sFlipY = false;
+				if(fabsf(*ndcX) > 0.25f && fabsf(ex) > 0.25f) { if((*ndcX > 0.0f) == (ex > 0.0f)) ++sAgreeX; else ++sDisX; }
+				if(fabsf(*ndcY) > 0.25f && fabsf(ey) > 0.25f) { if((*ndcY > 0.0f) == (ey > 0.0f)) ++sAgreeY; else ++sDisY; }
+				const bool fx = (sAgreeX + sDisX >= 4) && sDisX > sAgreeX, fy = (sAgreeY + sDisY >= 4) && sDisY > sAgreeY;
+				if(fx != sFlipX) { sFlipX = fx; _MESSAGE("dot: exact projection X axis %s", fx ? "inverted - flipping" : "ok"); }
+				if(fy != sFlipY) { sFlipY = fy; _MESSAGE("dot: exact projection Y axis %s", fy ? "inverted - flipping" : "ok"); }
+				static int sLogN = 0;
+				if(sLogN < 6) { ++sLogN; _MESSAGE("dot: exact ndc=(%.3f,%.3f) estimate=(%.3f,%.3f)", ex, ey, *ndcX, *ndcY); }
+				*ndcX = sFlipX ? -ex : ex;
+				*ndcY = sFlipY ? -ey : ey;
+			}
+		}
 		return true;
 	}
 
@@ -2935,6 +3088,13 @@ namespace
 				continue;
 			}
 			if(MenuBlockedCached()) { g_fastHold = 0; g_mvWant = 0; g_perfLast = 0; continue; }
+			if(AIDrivenCached())
+			{
+				if(g_lockOwn) LockOff("the game took control of the player");
+				g_active = 0; g_fastHold = 0; g_mvWant = 0; phase = 0; g_perfLast = 0;
+				Sleep(20);
+				continue;
+			}
 
 			// A sessao acaba quando passa o tempo sem novos botoes (o lock-on proprio nao tem tempo limite).
 			if(g_active && !g_lockOwn && (LONG)(now - g_endTick) >= 0) { g_endReason = 0; g_active = 0; }
