@@ -36,7 +36,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.18.2 (cauda de soltura do arco; sprint livre com lock; arco sem flechas; linha de visao mais tolerante; limites da camera com lock)"
+#define PLUGIN_VERSION_STR	"0.19.0 (sonda de raios do ambiente: so log; mais as correcoes da 0.18.2)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -180,6 +180,8 @@ namespace
 		int		noAmmoGuard;		// 1 = arco sem flechas equipadas nao conta como "a mirar"
 		int		lockCamLimit;		// 1 = limita a inclinacao da camera de 3a pessoa com o lock (evita chao / 1a pessoa)
 		float	lockCamUpDeg;		// maximo a olhar para cima, graus
+		// ---- v0.19.0
+		int		envProbe;			// 1 = sonda de raios do ambiente (chao, inclinacao, obstaculos a frente, saliencia): so escreve no log
 	};
 	Config g_cfg;
 
@@ -300,6 +302,7 @@ namespace
 		{ "NoAmmoGuard",			'i', &g_cfg.noAmmoGuard,		1.0f },
 		{ "LockCamLimit",			'i', &g_cfg.lockCamLimit,		1.0f },
 		{ "LockCamUpDegrees",		'f', &g_cfg.lockCamUpDeg,		40.0f },
+		{ "EnvProbe",				'i', &g_cfg.envProbe,			1.0f },
 	};
 	const int kNumOpts = sizeof(g_opts) / sizeof(g_opts[0]);
 
@@ -478,6 +481,8 @@ namespace
 		if(g_cfg.lockCamLimit > 1) g_cfg.lockCamLimit = 1;
 		if(g_cfg.lockCamUpDeg < 10.0f) g_cfg.lockCamUpDeg = 10.0f;
 		if(g_cfg.lockCamUpDeg > 80.0f) g_cfg.lockCamUpDeg = 80.0f;
+		if(g_cfg.envProbe < 0) g_cfg.envProbe = 0;
+		if(g_cfg.envProbe > 1) g_cfg.envProbe = 1;
 		if(g_cfg.requireLos < 0) g_cfg.requireLos = 0;
 		if(g_cfg.requireLos > 1) g_cfg.requireLos = 1;
 		if(g_cfg.keepBleedout < 0) g_cfg.keepBleedout = 0;
@@ -2252,6 +2257,155 @@ namespace
 		}
 		__except(EXCEPTION_EXECUTE_HANDLER) { dir = 0; cam = 0; }
 		*pdir = dir; *pcam = cam; *pcamVal = camVal; *pcamTick = camTick;
+	}
+
+	// =====================================================================================================================
+	// v0.19.0: sonda de raios do ambiente (so log). Raio do Havok pelo mesmo caminho da rotina vanilla de raios (0x006BF6E0):
+	// bhkWorld da celula (0x004C5430), PickObject no slot 0x2F da vtable, estrutura de pedido com origem/destino em escala Havok.
+	// Corre numa tarefa da thread do jogo, 10x por segundo, fora de combate. Qualquer erro desliga-a (g_envDead).
+	// =====================================================================================================================
+	volatile LONG	g_envDead = 0;
+	volatile LONG	g_envQueued = 0;
+	int				g_envLogN = 0;
+
+	struct EnvRay { bool hit; float dist; float nx, ny, nz; UInt32 layer; };
+
+	typedef void * (__fastcall * _EnvCellWorld)(void * cell);
+	typedef bool (__thiscall * _EnvPick)(void * world, void * pick);
+
+	// Lanca um raio de (sx,sy,sz) na direcao unitaria (dx,dy,dz) com comprimento len (unidades do jogo).
+	// Devolve false se nao foi possivel (sem mundo fisico, etc.); out->hit diz se acertou.
+	bool EnvCast(PlayerCharacter * player, float sx, float sy, float sz, float dx, float dy, float dz, float len, UInt32 castLayer, EnvRay * out)
+	{
+		out->hit = false; out->dist = len; out->nx = out->ny = out->nz = 0.0f; out->layer = 0;
+		const float scale = *(float *)0x01B11570;
+		if(!(scale > 0.001f && scale < 0.1f)) return false;
+		UInt8 * pl = (UInt8 *)player;
+		void * cell = *(void **)(pl + 0x40);
+		if(!cell) return false;
+		void * world = ((_EnvCellWorld)0x004C5430)(cell);
+		if(!world) return false;
+		// filtro de colisao do personagem (grupo do sistema: assim o raio nao acerta no proprio jogador)
+		UInt32 filter = 0;
+		void * proc = *(void **)(pl + 0x88);
+		void * mid = proc ? *(void **)((UInt8 *)proc + 0x04) : NULL;
+		void * ctrl = mid ? *(void **)((UInt8 *)mid + 0x15C) : NULL;
+		if(ctrl)
+		{
+			typedef UInt32 * (__thiscall * _Flt)(void *, UInt32 *);
+			UInt32 tmp = 0;
+			(*(_Flt **)ctrl)[8](ctrl, &tmp);
+			filter = tmp;
+		}
+		__declspec(align(16)) UInt8 pd[0xC0];
+		memset(pd, 0, sizeof(pd));
+		float * from = (float *)(pd + 0x00);
+		float * to = (float *)(pd + 0x10);
+		from[0] = sx * scale; from[1] = sy * scale; from[2] = sz * scale; from[3] = 0.0f;
+		to[0] = (sx + dx * len) * scale; to[1] = (sy + dy * len) * scale; to[2] = (sz + dz * len) * scale; to[3] = 0.0f;
+		*(UInt32 *)(pd + 0x24) = (filter & ~0x7Fu) | (castLayer & 0x7Fu);
+		*(float *)(pd + 0x40) = 1.0f;
+		*(UInt32 *)(pd + 0x44) = 0xFFFFFFFF;
+		*(UInt32 *)(pd + 0x48) = 0xFFFFFFFF;
+		*(UInt32 *)(pd + 0x50) = 0xFFFFFFFF;
+		memcpy(pd + 0x90, (const void *)0x01162820, 16);			// constante que a rotina vanilla copia para o pedido
+		(*(_EnvPick **)world)[0x2F](world, pd);
+		const float fr = *(float *)(pd + 0x40);
+		if(fr < 1.0f && fr >= 0.0f)
+		{
+			out->hit = true; out->dist = len * fr;
+			const float * n = (const float *)(pd + 0x30);
+			out->nx = n[0]; out->ny = n[1]; out->nz = n[2];
+			const UInt8 * root = *(const UInt8 **)(pd + 0x80);
+			if(root) out->layer = *(const UInt32 *)(root + 0x1C) & 0x7F;
+		}
+		return true;
+	}
+
+	void EnvMeasure()
+	{
+		if(g_envDead || !g_cfg.envProbe || !g_gameLive) return;
+		PlayerCharacter * player = Engine::Player();
+		if(!player || player->IsInCombat()) return;
+		static bool s_checked = false;
+		if(!s_checked)
+		{
+			s_checked = true;
+			const UInt8 * fn = (const UInt8 *)0x004C5430;
+			if(!(fn[0] == 0xF6 && fn[1] == 0x41 && fn[2] == 0x2C && fn[3] == 0x01))
+			{
+				InterlockedExchange(&g_envDead, 1);
+				_MESSAGE("env: the engine routine at 0x004C5430 is not the expected one - the ray probe is off");
+				return;
+			}
+		}
+		__try
+		{
+			const NiPoint3 pos = Engine::Position(player);
+			const float yaw = Engine::Rotation(player).z;
+			const float fx = sinf(yaw), fy = cosf(yaw);
+			EnvRay r;
+			// chao e inclinacao
+			float ground = -1.0f, slope = -1.0f;
+			if(!EnvCast(player, pos.x, pos.y, pos.z + 60.0f, 0, 0, -1.0f, 300.0f, 3, &r)) return;
+			if(r.hit) { ground = r.dist - 60.0f; slope = acosf(r.nz > 1.0f ? 1.0f : (r.nz < -1.0f ? -1.0f : r.nz)) * 57.2958f; }
+			// obstaculos a frente (joelho, cintura, cabeca)
+			static const float kH[3] = { 20.0f, 60.0f, 110.0f };
+			float fd[3]; UInt32 fl[3];
+			for(int i = 0; i < 3; ++i)
+			{
+				EnvCast(player, pos.x, pos.y, pos.z + kH[i], fx, fy, 0.0f, 330.0f, 3, &r);
+				fd[i] = r.hit ? r.dist : -1.0f; fl[i] = r.hit ? r.layer : 0;
+			}
+			// saliencia: raios para baixo a partir de 200 unidades acima dos pes, de 10 em 10 unidades para a frente (ate 75)
+			float ledgeH = -1.0f, ledgeD = -1.0f;
+			if(fd[0] >= 0.0f || fd[1] >= 0.0f)
+			{
+				for(float d = 10.0f; d <= 75.0f; d += 10.0f)
+				{
+					EnvCast(player, pos.x + fx * d, pos.y + fy * d, pos.z + 200.0f, 0, 0, -1.0f, 260.0f, 3, &r);
+					if(!r.hit) continue;
+					const float h = 200.0f - r.dist;
+					if(h >= 30.0f) { ledgeH = h; ledgeD = d; break; }
+				}
+			}
+			// so regista quando algo mudou de forma apreciavel
+			static int s_k[10]; int k[10];
+			k[0] = (int)(ground / 10.0f); k[1] = (int)(slope / 5.0f);
+			for(int i = 0; i < 3; ++i) { k[2 + i] = (int)(fd[i] / 20.0f); k[5 + i] = (int)fl[i]; }
+			k[8] = (int)(ledgeH / 10.0f); k[9] = (int)(ledgeD / 10.0f);
+			bool changed = false;
+			for(int i = 0; i < 10; ++i) if(k[i] != s_k[i]) { changed = true; s_k[i] = k[i]; }
+			if(changed && g_envLogN < 500)
+			{
+				++g_envLogN;
+				_MESSAGE("env: ground %.0f slope %.0f deg | front knee/waist/head = %.0f/%.0f/%.0f (layers %u/%u/%u) | ledge height %.0f at %.0f",
+						 ground, slope, fd[0], fd[1], fd[2], (unsigned)fl[0], (unsigned)fl[1], (unsigned)fl[2], ledgeH, ledgeD);
+			}
+		}
+		__except(EXCEPTION_EXECUTE_HANDLER)
+		{
+			InterlockedExchange(&g_envDead, 1);
+			_MESSAGE("env: exception during the ray probe - it is now off");
+		}
+	}
+
+	class EnvTask : public TaskDelegate
+	{
+	public:
+		virtual void Run(void) { EnvMeasure(); g_envQueued = 0; }
+		virtual void Dispose(void) { delete this; }
+	};
+
+	DWORD WINAPI EnvThread(LPVOID)
+	{
+		for(;;)
+		{
+			Sleep(100);
+			if(g_envDead || !g_cfg.envProbe || !g_gameLive || !g_taskIface) continue;
+			if(InterlockedExchange(&g_envQueued, 1) == 0) g_taskIface->AddTask(new EnvTask());
+		}
+		return 0;
 	}
 
 	DWORD WINAPI DmkThread(LPVOID)
@@ -4292,6 +4446,7 @@ namespace
 				CreateThread(NULL, 0, HoldThread, NULL, 0, NULL);
 				DmkInit();
 				CreateThread(NULL, 0, DmkThread, NULL, 0, NULL);
+				CreateThread(NULL, 0, EnvThread, NULL, 0, NULL);
 				_MESSAGE("input receiver registered, turn thread started");
 				break;
 			}
