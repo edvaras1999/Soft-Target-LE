@@ -36,7 +36,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.20.0 (paralaxe do arco corrigida; sensores de ambiente RaySense em globais; ST_JumpObstacle)"
+#define PLUGIN_VERSION_STR	"0.20.1 (sensores RaySense: esp corrigido, tipo de obstaculo robusto)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -2310,14 +2310,16 @@ namespace
 	void EnvResolveForms()
 	{
 		if(g_envResolved || g_envModIdx < 0) return;
+		static int s_tries = 0;
 		int ok = 0;
 		for(int i = 0; i < kEnvN; ++i)
 		{
 			TESForm * f = LookupFormByID(((UInt32)g_envModIdx << 24) | (UInt32)(0x800 + i));
 			if(f && f->formType == kFormType_Global) { g_envG[i] = (TESGlobal *)f; ++ok; }
 		}
-		g_envResolved = 1;
-		_MESSAGE("env: %d of %d globals found in SoftTargetEnv.esp", ok, (int)kEnvN);
+		++s_tries;
+		if(ok > 0 || s_tries >= 50) g_envResolved = 1;
+		if(ok > 0 || s_tries == 1 || s_tries == 50) _MESSAGE("env: %d of %d globals found in SoftTargetEnv.esp (attempt %d)", ok, (int)kEnvN, s_tries);
 	}
 
 	inline void EnvSet(int i, float v)
@@ -2458,8 +2460,15 @@ namespace
 				obsType = (float)kFormType_Static;
 				if(s_refOk && fr[nr].root)
 				{
+					// por camada: 30 = personagem (NPC); o resto estatico. O formulario real so refina se for valido.
+					if(fr[nr].layer == 30) obsType = (float)kFormType_NPC;
 					TESObjectREFR * ref = ((_EnvFindRef)0x004726B0)(fr[nr].root);
-					if(ref && ref->baseForm) obsType = (float)ref->baseForm->formType;
+					if(ref && (ref->formType == kFormType_Reference || ref->formType == kFormType_Character) && ref->baseForm)
+					{
+						const UInt8 bt = ref->baseForm->formType;
+						if(bt == kFormType_Static || bt == kFormType_Tree || bt == kFormType_Furniture || bt == kFormType_Door || bt == kFormType_Activator || bt == kFormType_MovableStatic || bt == kFormType_NPC)
+							obsType = (float)bt;
+					}
 				}
 				const float D = fr[nr].dist;
 				if(fr[2].hit && fr[2].dist <= D + 8.0f) obsH = 200.0f;			// mais alto que a cabeca
