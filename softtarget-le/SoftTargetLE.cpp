@@ -36,7 +36,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.20.1 (sensores RaySense: esp corrigido, tipo de obstaculo robusto)"
+#define PLUGIN_VERSION_STR	"0.21.0 (esp unico com 34 globais: paredes em 5 direcoes, viga, obstaculos laterais; medicao de tempo)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -2290,13 +2290,19 @@ namespace
 	int				g_envLogN = 0;
 
 	// v0.20.0: globais do SoftTargetEnv.esp (formularios 0x800..0x80B). Os nomes seguem os do RaySense para os pacotes convertidos.
-	enum { kEnvN = 12 };
+	enum { kEnvN = 34 };
+	enum { kEnvJump = 11, kEnvWallFL = 12, kEnvWallFR = 13, kEnvTypeL = 14, kEnvTypeR = 15, kEnvBeamLeap = 16, kEnvOnBeam = 17 };
 	const char * const kEnvNames[kEnvN] = {
 		"Obstacle_Type_Front", "Verticality_Obstacle", "Verticality_Front", "Verticality_Player", "RaySense_SurfaceSlope", "RaySense_MacroSlope_Front",
-		"RaySense_Wall_Front", "RaySense_Wall_Left", "RaySense_Wall_Right", "RaySense_LedgeHeight", "RaySense_LedgeDistance", "ST_JumpObstacle" };
+		"RaySense_Wall_Front", "RaySense_Wall_Left", "RaySense_Wall_Right", "RaySense_LedgeHeight", "RaySense_LedgeDistance", "ST_JumpObstacle",
+		"RaySense_Wall_FrontLeft", "RaySense_Wall_FrontRight", "Obstacle_Type_Left", "Obstacle_Type_Right", "BeamWalkLeap", "BeamWalkOnBeam",
+		"Cover_F_to_F", "Cover_F_to_B", "Cover_F_to_L", "Cover_F_to_R", "Cover_B_to_F", "Cover_B_to_B", "Cover_B_to_L", "Cover_B_to_R",
+		"Cover_L_to_F", "Cover_L_to_B", "Cover_L_to_L", "Cover_L_to_R", "Cover_R_to_F", "Cover_R_to_B", "Cover_R_to_L", "Cover_R_to_R" };
 	TESGlobal * 	g_envG[kEnvN];
 	volatile LONG	g_envModIdx = -1;
 	volatile LONG	g_envResolved = 0;
+	volatile LONG	g_envIdle = 0;			// 1 = parado e sem obstaculo: a leitura abranda
+	volatile LONG	g_envOnBeam = 0;		// 1 = em cima de uma viga/passadico estreito (para BeamWalkLeap)
 	volatile float	g_envObsH = 0.0f;		// ultima altura do obstaculo a frente (para o ST_JumpObstacle)
 
 	void EnvResolveMod()
@@ -2395,8 +2401,29 @@ namespace
 
 	void EnvZero()
 	{
-		for(int i = 0; i < kEnvN - 1; ++i) EnvSet(i, 0.0f);
-		g_envObsH = 0.0f;
+		for(int i = 0; i <= 10; ++i) EnvSet(i, 0.0f);
+		EnvSet(kEnvWallFL, 999.0f); EnvSet(kEnvWallFR, 999.0f); EnvSet(6, 999.0f); EnvSet(7, 999.0f); EnvSet(8, 999.0f);
+		EnvSet(kEnvTypeL, 0.0f); EnvSet(kEnvTypeR, 0.0f); EnvSet(kEnvOnBeam, 0.0f);
+		g_envObsH = 0.0f; g_envOnBeam = 0;
+	}
+
+	// classifica o que um raio acertou: 43 = personagem (camada 30), 34 = estatico; refina com o formulario real quando valido
+	float EnvClassify(const EnvRay & r, bool refOk)
+	{
+		if(!r.hit) return 0.0f;
+		float t = (float)kFormType_Static;
+		if(r.layer == 30) t = (float)kFormType_NPC;
+		if(refOk && r.root)
+		{
+			TESObjectREFR * ref = ((_EnvFindRef)0x004726B0)(r.root);
+			if(ref && (ref->formType == kFormType_Reference || ref->formType == kFormType_Character) && ref->baseForm)
+			{
+				const UInt8 bt = ref->baseForm->formType;
+				if(bt == kFormType_Static || bt == kFormType_Tree || bt == kFormType_Furniture || bt == kFormType_Door || bt == kFormType_Activator || bt == kFormType_MovableStatic || bt == kFormType_NPC)
+					t = (float)bt;
+			}
+		}
+		return t;
 	}
 
 	void EnvMeasure()
@@ -2420,15 +2447,17 @@ namespace
 			}
 			const UInt8 * fr = (const UInt8 *)0x004726B0;
 			s_refOk = (fr[0] == 0x8B && fr[1] == 0x4C && fr[2] == 0x24 && fr[3] == 0x04 && fr[4] == 0x83 && fr[5] == 0xEC && fr[6] == 0x0C);
-			if(!s_refOk) _MESSAGE("env: FindCollidableRef is not the expected routine - Obstacle_Type_Front falls back to 34 (static)");
+			if(!s_refOk) _MESSAGE("env: FindCollidableRef is not the expected routine - obstacle types fall back to the collision layer");
 		}
 		EnvResolveForms();
+		LARGE_INTEGER t0, t1, qf; QueryPerformanceCounter(&t0);
 		__try
 		{
 			const NiPoint3 pos = Engine::Position(player);
 			const float yaw = Engine::Rotation(player).z;
 			const float fx = sinf(yaw), fy = cosf(yaw);			// frente
 			const float rx = fy, ry = -fx;						// direita
+			const bool moving = g_moveHeld != 0;
 			const float det = (g_shiftHeld && g_moveHeld) ? g_cfg.envSprintDist : g_cfg.envWalkDist;
 			EnvRay r;
 			// chao sob o jogador e inclinacao
@@ -2436,12 +2465,17 @@ namespace
 			if(!ok0) { h0 = 0.0f; nz0 = 1.0f; }
 			const float vertPlayer = ok0 ? (h0 < 0.0f ? -h0 : 0.0f) : 300.0f;
 			const float slope = acosf(nz0 > 1.0f ? 1.0f : (nz0 < -1.0f ? -1.0f : nz0)) * 57.2958f;
-			// terreno a frente: 80 (diferenca de elevacao) e 150 (inclinacao em ponto mais largo)
-			float h80 = 0.0f, h150 = 0.0f;
-			const bool ok80 = EnvGroundH(player, pos.x + fx * 80.0f, pos.y + fy * 80.0f, pos.z, &h80, NULL);
-			const bool ok150 = EnvGroundH(player, pos.x + fx * 150.0f, pos.y + fy * 150.0f, pos.z, &h150, NULL);
-			const float vertFront = ok80 ? (h80 - h0) : -300.0f;
-			const float macro = ok150 ? atan2f(h150 - h0, 150.0f) * 57.2958f : 0.0f;
+			// terreno a frente (so em movimento ou com algo a frente): 80 (diferenca de elevacao) e 150 (inclinacao em ponto mais largo)
+			float h80 = 0.0f, h150 = 0.0f; bool ok80 = false, ok150 = false;
+			static float s_vf = 0.0f, s_mc = 0.0f;
+			if(moving || !s_checked)
+			{
+				ok80 = EnvGroundH(player, pos.x + fx * 80.0f, pos.y + fy * 80.0f, pos.z, &h80, NULL);
+				ok150 = EnvGroundH(player, pos.x + fx * 150.0f, pos.y + fy * 150.0f, pos.z, &h150, NULL);
+				s_vf = ok80 ? (h80 - h0) : -300.0f;
+				s_mc = ok150 ? atan2f(h150 - h0, 150.0f) * 57.2958f : 0.0f;
+			}
+			const float vertFront = s_vf, macro = s_mc;
 			// obstaculos a frente (joelho, cintura, cabeca)
 			static const float kH[3] = { 20.0f, 60.0f, 110.0f };
 			EnvRay fr[3]; float fd[3]; UInt32 fl[3];
@@ -2450,26 +2484,13 @@ namespace
 				EnvCast(player, pos.x, pos.y, pos.z + kH[i], fx, fy, 0.0f, det, 3, &fr[i]);
 				fd[i] = fr[i].hit ? fr[i].dist : -1.0f; fl[i] = fr[i].hit ? fr[i].layer : 0;
 			}
-			// obstaculo mais proximo (joelho ou cintura): tipo e altura do topo
 			int nr = -1;
 			if(fr[0].hit) nr = 0;
 			if(fr[1].hit && (nr < 0 || fr[1].dist < fr[0].dist)) nr = 1;
 			float obsType = 0.0f, obsH = 0.0f;
 			if(nr >= 0)
 			{
-				obsType = (float)kFormType_Static;
-				if(s_refOk && fr[nr].root)
-				{
-					// por camada: 30 = personagem (NPC); o resto estatico. O formulario real so refina se for valido.
-					if(fr[nr].layer == 30) obsType = (float)kFormType_NPC;
-					TESObjectREFR * ref = ((_EnvFindRef)0x004726B0)(fr[nr].root);
-					if(ref && (ref->formType == kFormType_Reference || ref->formType == kFormType_Character) && ref->baseForm)
-					{
-						const UInt8 bt = ref->baseForm->formType;
-						if(bt == kFormType_Static || bt == kFormType_Tree || bt == kFormType_Furniture || bt == kFormType_Door || bt == kFormType_Activator || bt == kFormType_MovableStatic || bt == kFormType_NPC)
-							obsType = (float)bt;
-					}
-				}
+				obsType = EnvClassify(fr[nr], s_refOk);
 				const float D = fr[nr].dist;
 				if(fr[2].hit && fr[2].dist <= D + 8.0f) obsH = 200.0f;			// mais alto que a cabeca
 				else
@@ -2484,11 +2505,16 @@ namespace
 					if(obsH < 0.0f) obsH = 0.0f;
 				}
 			}
-			// paredes: frente (cintura) e lados (a 100 unidades); so superficies quase verticais
-			float wallF = 0.0f, wallL = 0.0f, wallR = 0.0f;
-			if(fr[1].hit && fabsf(fr[1].nz) < 0.5f) wallF = fr[1].dist;
-			if(EnvCast(player, pos.x, pos.y, pos.z + 60.0f, -rx, -ry, 0.0f, 100.0f, 3, &r) && r.hit && fabsf(r.nz) < 0.5f) wallL = r.dist;
-			if(EnvCast(player, pos.x, pos.y, pos.z + 60.0f, rx, ry, 0.0f, 100.0f, 3, &r) && r.hit && fabsf(r.nz) < 0.5f) wallR = r.dist;
+			// paredes em 5 direcoes (frente, diagonais, lados) a 80 de altura, ate 100 de distancia; so superficies quase verticais; 999 = sem parede
+			static const float kWA[5][2] = { {0.0f, 1.0f}, {-0.7071f, 0.7071f}, {0.7071f, 0.7071f}, {-1.0f, 0.0f}, {1.0f, 0.0f} };	// (direita, frente) de cada raio
+			float wall[5]; float wtype[5];
+			for(int i = 0; i < 5; ++i)
+			{
+				const float dx = rx * kWA[i][0] + fx * kWA[i][1], dy = ry * kWA[i][0] + fy * kWA[i][1];
+				wall[i] = 999.0f; wtype[i] = 0.0f;
+				if(EnvCast(player, pos.x, pos.y, pos.z + 80.0f, dx, dy, 0.0f, 100.0f, 3, &r) && r.hit && fabsf(r.nz) < 0.5f)
+				{ wall[i] = r.dist; wtype[i] = EnvClassify(r, s_refOk); }
+			}
 			// saliencia: raios para baixo a partir de 200 unidades acima dos pes, de 10 em 10 unidades para a frente (ate 75)
 			float ledgeH = 0.0f, ledgeD = 0.0f;
 			if(nr >= 0)
@@ -2501,27 +2527,59 @@ namespace
 					if(h >= 30.0f) { ledgeH = h; ledgeD = d; break; }
 				}
 			}
+			// viga / passadico estreito: chao pouco inclinado e queda >= 50 a pelo menos um dos lados (a 45 do centro), mantido 0.2 s
+			static DWORD s_beamSince = 0, s_beamLost = 0;
+			{
+				const DWORD tn = GetTickCount();
+				float hl = 0.0f, hr = 0.0f;
+				const bool okl = EnvGroundH(player, pos.x - rx * 45.0f, pos.y - ry * 45.0f, pos.z, &hl, NULL);
+				const bool okr = EnvGroundH(player, pos.x + rx * 45.0f, pos.y + ry * 45.0f, pos.z, &hr, NULL);
+				const bool dropL = !okl || (h0 - hl) >= 50.0f, dropR = !okr || (h0 - hr) >= 50.0f;
+				const bool cand = ok0 && slope < 30.0f && vertPlayer < 15.0f && (dropL || dropR);
+				if(cand) { if(!s_beamSince) s_beamSince = tn; s_beamLost = 0; }
+				else { s_beamSince = 0; if(!s_beamLost) s_beamLost = tn; }
+				if(cand && (DWORD)(tn - s_beamSince) >= 200 && !g_envOnBeam) { g_envOnBeam = 1; _MESSAGE("env: BeamWalkOnBeam ON (drop left %s / right %s)", dropL ? "yes" : "no", dropR ? "yes" : "no"); }
+				else if(!cand && g_envOnBeam && s_beamLost && (DWORD)(tn - s_beamLost) >= 300) { g_envOnBeam = 0; _MESSAGE("env: BeamWalkOnBeam OFF"); }
+			}
 			// globais
 			EnvSet(0, obsType); EnvSet(1, obsH); EnvSet(2, vertFront); EnvSet(3, vertPlayer); EnvSet(4, slope); EnvSet(5, macro);
-			EnvSet(6, wallF); EnvSet(7, wallL); EnvSet(8, wallR); EnvSet(9, ledgeH); EnvSet(10, ledgeD);
+			EnvSet(6, wall[0]); EnvSet(kEnvWallFL, wall[1]); EnvSet(kEnvWallFR, wall[2]); EnvSet(7, wall[3]); EnvSet(8, wall[4]);
+			EnvSet(kEnvTypeL, wtype[3]); EnvSet(kEnvTypeR, wtype[4]);
+			EnvSet(9, ledgeH); EnvSet(10, ledgeD); EnvSet(kEnvOnBeam, g_envOnBeam ? 1.0f : 0.0f);
 			g_envObsH = obsH;
 			// log so quando algo mudou de forma apreciavel
-			static int s_k[12]; int k[12];
+			static int s_k[14]; int k[14];
 			k[0] = (int)obsType; k[1] = (int)(obsH / 10.0f); k[2] = (int)(vertFront / 20.0f); k[3] = (int)(vertPlayer / 20.0f); k[4] = (int)(slope / 5.0f); k[5] = (int)(macro / 5.0f);
-			k[6] = (int)(wallF / 20.0f); k[7] = (int)(wallL / 20.0f); k[8] = (int)(wallR / 20.0f); k[9] = (int)(ledgeH / 10.0f); k[10] = (int)(ledgeD / 10.0f); k[11] = (int)(det / 10.0f);
+			k[6] = (int)(wall[0] / 20.0f); k[7] = (int)(wall[3] / 20.0f); k[8] = (int)(wall[4] / 20.0f); k[9] = (int)(ledgeH / 10.0f); k[10] = (int)(ledgeD / 10.0f);
+			k[11] = (int)(wall[1] / 20.0f) * 64 + (int)(wall[2] / 20.0f); k[12] = (int)wtype[3] * 256 + (int)wtype[4]; k[13] = g_envOnBeam;
 			bool changed = false;
-			for(int i = 0; i < 12; ++i) if(k[i] != s_k[i]) { changed = true; s_k[i] = k[i]; }
+			for(int i = 0; i < 14; ++i) if(k[i] != s_k[i]) { changed = true; s_k[i] = k[i]; }
 			if(changed && g_envLogN < 500)
 			{
 				++g_envLogN;
-				_MESSAGE("env: type %.0f obstacle %.0f | front %.0f player %.0f slope %.0f macro %.0f | walls F/L/R %.0f/%.0f/%.0f | ledge %.0f at %.0f | knee/waist/head %.0f/%.0f/%.0f (layers %u/%u/%u)",
-						 obsType, obsH, vertFront, vertPlayer, slope, macro, wallF, wallL, wallR, ledgeH, ledgeD, fd[0], fd[1], fd[2], (unsigned)fl[0], (unsigned)fl[1], (unsigned)fl[2]);
+				_MESSAGE("env: type %.0f obstacle %.0f | front %.0f player %.0f slope %.0f macro %.0f | walls F/FL/FR/L/R %.0f/%.0f/%.0f/%.0f/%.0f (types L/R %.0f/%.0f) | ledge %.0f at %.0f | beam %d | knee/waist/head %.0f/%.0f/%.0f (layers %u/%u/%u)",
+						 obsType, obsH, vertFront, vertPlayer, slope, macro, wall[0], wall[1], wall[2], wall[3], wall[4], wtype[3], wtype[4], ledgeH, ledgeD, (int)g_envOnBeam, fd[0], fd[1], fd[2], (unsigned)fl[0], (unsigned)fl[1], (unsigned)fl[2]);
 			}
+			g_envIdle = (!moving && obsH <= 0.0f) ? 1 : 0;
 		}
 		__except(EXCEPTION_EXECUTE_HANDLER)
 		{
 			InterlockedExchange(&g_envDead, 1);
 			_MESSAGE("env: exception during the sensors - they are now off");
+		}
+		// medicao de tempo: media e maximo (ms) a cada 10 s, ate 40 linhas
+		QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&qf);
+		{
+			static double s_sum = 0.0, s_max = 0.0; static int s_n = 0, s_lines = 0; static DWORD s_last = 0;
+			const double ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)qf.QuadPart;
+			s_sum += ms; ++s_n; if(ms > s_max) s_max = ms;
+			const DWORD tn = GetTickCount();
+			if(!s_last) s_last = tn;
+			if((DWORD)(tn - s_last) >= 10000 && s_lines < 40)
+			{
+				_MESSAGE("env: timing: %d readings in 10 s, average %.3f ms, worst %.3f ms", s_n, s_sum / (s_n ? s_n : 1), s_max);
+				++s_lines; s_sum = 0.0; s_max = 0.0; s_n = 0; s_last = tn;
+			}
 		}
 	}
 
@@ -2536,7 +2594,7 @@ namespace
 	{
 		for(;;)
 		{
-			Sleep(100);
+			Sleep(g_envIdle ? 250 : 100);
 			if(g_envDead || !g_cfg.envProbe || !g_gameLive || !g_taskIface) continue;
 			if(InterlockedExchange(&g_envQueued, 1) == 0) g_taskIface->AddTask(new EnvTask());
 		}
@@ -2547,12 +2605,12 @@ namespace
 	// alto a frente (Verticality_Obstacle >= JumpObstacleMin) fica a 1 (ou 2 se >= 200 em movimento) ate aterrar. As animacoes de queda/aterragem do pacote testam-no.
 	DWORD WINAPI EnvJumpThread(LPVOID)
 	{
-		int prev = 0; bool latched = false; DWORD latchTick = 0;
+		int prev = 0; bool latched = false, leap = false; DWORD latchTick = 0;
 		for(;;)
 		{
 			Sleep(30);
-			if(!g_gameLive || g_envDead || !g_envG[kEnvN - 1]) continue;
-			if(!g_cfg.envJump || !g_cfg.envProbe) { if(latched) { latched = false; EnvSet(kEnvN - 1, 0.0f); } continue; }
+			if(!g_gameLive || g_envDead || !g_envG[kEnvJump]) continue;
+			if(!g_cfg.envJump || !g_cfg.envProbe) { if(latched) { latched = false; EnvSet(kEnvJump, 0.0f); } continue; }
 			int st = -1;
 			__try
 			{
@@ -2566,20 +2624,23 @@ namespace
 				}
 			}
 			__except(EXCEPTION_EXECUTE_HANDLER) { st = -1; }
-			if(st < 0 || st > 8) { prev = 0; if(latched) { latched = false; EnvSet(kEnvN - 1, 0.0f); } continue; }
+			if(st < 0 || st > 8) { prev = 0; if(latched) { latched = false; EnvSet(kEnvJump, 0.0f); } continue; }
 			const DWORD now = GetTickCount();
 			if(st != 0 && prev == 0 && !latched && g_envObsH >= g_cfg.jumpObstacleMin)
 			{
 				// 1 = obstaculo >= JumpObstacleMin (salto "Front Flip"); 2 = obstaculo >= 200 a correr/mover (salto "Cat Pass")
 				const float lv = (g_envObsH >= 200.0f && g_moveHeld) ? 2.0f : 1.0f;
-				latched = true; latchTick = now; EnvSet(kEnvN - 1, lv);
+				latched = true; latchTick = now; EnvSet(kEnvJump, lv);
 				_MESSAGE("env: ST_JumpObstacle = %.0f (jump with an obstacle %.0f high in front, state %d)", lv, (double)g_envObsH, st);
 			}
 			else if(latched && (st == 0 || (DWORD)(now - latchTick) > 8000))
 			{
-				latched = false; EnvSet(kEnvN - 1, 0.0f);
+				latched = false; EnvSet(kEnvJump, 0.0f);
 				_MESSAGE("env: ST_JumpObstacle OFF (landed)");
 			}
+			// BeamWalkLeap: salto iniciado em cima de uma viga; fica a 1 ate aterrar
+			if(st != 0 && prev == 0 && !leap && g_envOnBeam) { leap = true; EnvSet(kEnvBeamLeap, 1.0f); _MESSAGE("env: BeamWalkLeap ON"); }
+			else if(leap && st == 0) { leap = false; EnvSet(kEnvBeamLeap, 0.0f); _MESSAGE("env: BeamWalkLeap OFF"); }
 			prev = st;
 		}
 		return 0;
