@@ -36,7 +36,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.22.0 (sensores por demanda e em dois ritmos; valor mantido do obstaculo; registo de cada salto)"
+#define PLUGIN_VERSION_STR	"0.23.0 (desempenho: ritmo por modo, medicao de CPU, Keytrace so em combate; bonus de salto de obstaculo)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -192,6 +192,12 @@ namespace
 		int		envPerf;			// 0 = leve (PC fraco, por omissao), 1 = normal, 2 = potente: ritmo dos sensores
 		int		envDemand;			// 1 = so corre os sensores que as animacoes (OAR) usam de facto
 		float	envHoldMs;			// tempo que o valor mais alto do obstaculo se mantem (ms)
+		// ---- v0.23.0
+		float	obsMinDist;			// distancia minima ao obstaculo para o salto de obstaculo (mais perto fica para o FreeRun)
+		int		jumpBonus;			// 1 = aumenta a altura do salto so nos saltos de obstaculo
+		float	jumpClearance;		// folga acima do topo do obstaculo (unidades)
+		float	jumpMaxMult;		// multiplicador maximo da altura do salto
+		int		keytraceCombatOnly;	// 1 = a mascara Keytrace so se calcula com arma sacada e lock/alvo travado
 	};
 	Config g_cfg;
 
@@ -320,6 +326,11 @@ namespace
 		{ "EnvPerformance",			'i', &g_cfg.envPerf,			0.0f },
 		{ "EnvDemandScan",			'i', &g_cfg.envDemand,			1.0f },
 		{ "EnvHoldMs",				'f', &g_cfg.envHoldMs,			300.0f },
+		{ "ObstacleJumpMinDistance",'f', &g_cfg.obsMinDist,			70.0f },
+		{ "ObstacleJumpBonus",		'i', &g_cfg.jumpBonus,			1.0f },
+		{ "ObstacleJumpClearance",	'f', &g_cfg.jumpClearance,		25.0f },
+		{ "ObstacleJumpMaxMult",	'f', &g_cfg.jumpMaxMult,		2.5f },
+		{ "KeytraceCombatOnly",		'i', &g_cfg.keytraceCombatOnly,	1.0f },
 		{ "EnvSprintDistance",		'f', &g_cfg.envSprintDist,		330.0f },
 	};
 	const int kNumOpts = sizeof(g_opts) / sizeof(g_opts[0]);
@@ -517,6 +528,16 @@ namespace
 		if(g_cfg.envDemand > 1) g_cfg.envDemand = 1;
 		if(g_cfg.envHoldMs < 0.0f) g_cfg.envHoldMs = 0.0f;
 		if(g_cfg.envHoldMs > 1000.0f) g_cfg.envHoldMs = 1000.0f;
+		if(g_cfg.obsMinDist < 0.0f) g_cfg.obsMinDist = 0.0f;
+		if(g_cfg.obsMinDist > 300.0f) g_cfg.obsMinDist = 300.0f;
+		if(g_cfg.jumpBonus < 0) g_cfg.jumpBonus = 0;
+		if(g_cfg.jumpBonus > 1) g_cfg.jumpBonus = 1;
+		if(g_cfg.jumpClearance < 0.0f) g_cfg.jumpClearance = 0.0f;
+		if(g_cfg.jumpClearance > 100.0f) g_cfg.jumpClearance = 100.0f;
+		if(g_cfg.jumpMaxMult < 1.0f) g_cfg.jumpMaxMult = 1.0f;
+		if(g_cfg.jumpMaxMult > 4.0f) g_cfg.jumpMaxMult = 4.0f;
+		if(g_cfg.keytraceCombatOnly < 0) g_cfg.keytraceCombatOnly = 0;
+		if(g_cfg.keytraceCombatOnly > 1) g_cfg.keytraceCombatOnly = 1;
 		if(g_cfg.requireLos < 0) g_cfg.requireLos = 0;
 		if(g_cfg.requireLos > 1) g_cfg.requireLos = 1;
 		if(g_cfg.keepBleedout < 0) g_cfg.keepBleedout = 0;
@@ -1550,6 +1571,33 @@ namespace
 	// v0.16.2: o mod so age com um jogo carregado (save ou jogo novo) e nunca mexe na camera/corpo com um menu aberto.
 	volatile LONG	g_gameLive = 0;
 	DWORD			g_perfLast = 0;
+
+	// v0.23.0: ritmo minimo (ms) das threads rapidas por modo de desempenho (0 leve, 1 normal, 2 potente) e medicao de CPU por thread
+	inline DWORD PerfTurnMin() { static const DWORD k[3] = { 4, 2, 1 }; int m = g_cfg.envPerf; return k[m < 0 ? 0 : (m > 2 ? 2 : m)]; }
+	inline DWORD PerfFastMin() { static const DWORD k[3] = { 3, 2, 1 }; int m = g_cfg.envPerf; return k[m < 0 ? 0 : (m > 2 ? 2 : m)]; }
+	enum { kThrTurn, kThrMv, kThrHold, kThrDmk, kThrEnv, kThrJump, kThrN };
+	HANDLE			g_thr[kThrN];
+	const char * const kThrNames[kThrN] = { "turn", "move", "hold", "dmk", "env", "jump" };
+	void PerfLog()
+	{
+		static ULONGLONG s_prev[kThrN]; static DWORD s_last = 0; static int s_lines = 0;
+		const DWORD now = GetTickCount();
+		if(!s_last) { s_last = now; for(int i = 0; i < kThrN; ++i) s_prev[i] = 0; }
+		if((DWORD)(now - s_last) < 10000 || s_lines >= 60) return;
+		const double wall = (double)(DWORD)(now - s_last) * 10000.0;			// em unidades de 100 ns
+		char buf[160]; int n = 0; double sum = 0.0;
+		for(int i = 0; i < kThrN; ++i)
+		{
+			FILETIME c, e, k, u; ULONGLONG t = 0;
+			if(g_thr[i] && GetThreadTimes(g_thr[i], &c, &e, &k, &u))
+				t = (((ULONGLONG)k.dwHighDateTime << 32) | k.dwLowDateTime) + (((ULONGLONG)u.dwHighDateTime << 32) | u.dwLowDateTime);
+			const double pc = s_prev[i] ? (double)(t - s_prev[i]) * 100.0 / wall : 0.0;
+			s_prev[i] = t; sum += pc;
+			n += _snprintf_s(buf + n, sizeof(buf) - n, _TRUNCATE, "%s %.1f%% ", kThrNames[i], pc);
+		}
+		s_last = now;
+		if(sum > 0.05) { ++s_lines; _MESSAGE("perf: CPU of one core in 10 s: %stotal %.1f%% (mode %d)", buf, sum, g_cfg.envPerf); }
+	}
 	DWORD			g_camGuardUntil = 0;
 	int				g_camChkN = 0;
 	volatile DWORD	g_liveTick = 0;
@@ -1997,7 +2045,7 @@ namespace
 	{
 		for(;;)
 		{
-			Sleep((g_mvLearnState || g_mvWant) ? 1 : 10);
+			Sleep((g_mvLearnState || g_mvWant) ? PerfFastMin() : 10);
 			if(g_mvLearnState == 1 || g_mvLearnState == 2) { MvLearn(GetTickCount()); continue; }
 			if(!g_mvFound || !g_mvWant || GetTickCount() - g_mvWantTick > 120) { g_mvHaveLast = 0; continue; }
 			__try
@@ -2417,8 +2465,10 @@ namespace
 		return true;
 	}
 
+	static void EnvRestoreJump();
 	void EnvZero()
 	{
+		EnvRestoreJump();
 		for(int i = 0; i <= 10; ++i) EnvSet(i, 0.0f);
 		EnvSet(kEnvWallFL, 999.0f); EnvSet(kEnvWallFR, 999.0f); EnvSet(6, 999.0f); EnvSet(7, 999.0f); EnvSet(8, 999.0f);
 		EnvSet(kEnvTypeL, 0.0f); EnvSet(kEnvTypeR, 0.0f); EnvSet(kEnvOnBeam, 0.0f);
@@ -2540,6 +2590,42 @@ namespace
 
 	struct EnvPos { NiPoint3 pos; float fx, fy, rx, ry; bool moving; float det; };
 
+	// v0.23.0: bonus de altura so nos saltos de obstaculo. O jogo calcula a altura do salto como fJumpHeightMin * (factor do ator) no momento do salto
+	// (rotina em 0x00781550); por isso, enquanto ha um obstaculo elegivel a frente, a definicao e elevada para (topo + folga) e volta ao valor original
+	// logo que deixa de haver. Se outro mod mudar a definicao entretanto, o valor dele e respeitado.
+	static float s_jbBase = 0.0f, s_jbApplied = 0.0f; static int s_jbOk = -1;
+	static void EnvRestoreJump()
+	{
+		if(s_jbOk != 1 || s_jbApplied <= 0.0f) return;
+		volatile float * v = (volatile float *)0x01B16218;
+		if(*v == s_jbApplied) *v = s_jbBase;
+		s_jbApplied = 0.0f;
+	}
+	static void EnvApplyJumpBonus(float h)
+	{
+		if(!g_cfg.jumpBonus) { EnvRestoreJump(); return; }
+		if(s_jbOk < 0)
+		{
+			s_jbOk = 0;
+			const char * nm = *(const char * const *)0x01B1621C;
+			const float cur = *(const float *)0x01B16218;
+			if(nm && !strcmp(nm, "fJumpHeightMin") && cur > 10.0f && cur < 500.0f) s_jbOk = 1;
+			_MESSAGE("env: jump height setting at 0x01B16214 %s (value %.1f)", s_jbOk ? "verified" : "NOT verified - the obstacle jump bonus is off", cur);
+		}
+		if(s_jbOk != 1) return;
+		volatile float * v = (volatile float *)0x01B16218;
+		if(h >= g_cfg.jumpObstacleMin)
+		{
+			if(s_jbApplied <= 0.0f || *v != s_jbApplied) { s_jbBase = *v; s_jbApplied = 0.0f; }
+			float mult = (h + g_cfg.jumpClearance) / s_jbBase;
+			if(mult < 1.0f) mult = 1.0f;
+			if(mult > g_cfg.jumpMaxMult) mult = g_cfg.jumpMaxMult;
+			const float nv = s_jbBase * mult;
+			*v = nv; s_jbApplied = nv;
+		}
+		else EnvRestoreJump();
+	}
+
 	// grupo rapido: raios a frente (joelho, cintura, cabeca) e topo do obstaculo; mantem o valor mais alto durante EnvHoldMs
 	static void EnvGroupFwd(PlayerCharacter * player, const EnvPos & e, bool refOk)
 	{
@@ -2556,7 +2642,10 @@ namespace
 		if(fr[1].hit && (nr < 0 || fr[1].dist < fr[0].dist)) nr = 1;
 		float type = 0.0f, h = 0.0f;
 		g_envFwdD = nr >= 0 ? fr[nr].dist : -1.0f;
-		if(nr >= 0)
+		// perto demais da superficie: fica para o FreeRun (escalada), o salto de obstaculo nao se aplica
+		const bool tooClose = nr >= 0 && fr[nr].dist < g_cfg.obsMinDist;
+		if(tooClose) { g_es.heldH = 0.0f; g_es.heldTick = GetTickCount(); }
+		if(nr >= 0 && !tooClose)
 		{
 			type = EnvClassify(fr[nr], refOk);
 			const float D = fr[nr].dist;
@@ -2576,8 +2665,10 @@ namespace
 		const DWORD now = GetTickCount();
 		g_es.obsRaw = h; g_envRawH = h;
 		if(h >= g_es.heldH || (DWORD)(now - g_es.heldTick) > (DWORD)g_cfg.envHoldMs) { g_es.heldH = h; g_es.heldTick = now; g_es.obsType = type; }
-		g_envObsH = g_es.heldH; g_envHeldType = g_es.obsType;
-		EnvSet(0, g_es.obsType); EnvSet(1, g_es.heldH);
+		const float pub = tooClose ? 0.0f : g_es.heldH;
+		g_envObsH = pub; g_envHeldType = tooClose ? 0.0f : g_es.obsType;
+		EnvSet(0, tooClose ? 0.0f : g_es.obsType); EnvSet(1, pub);
+		EnvApplyJumpBonus(pub);
 	}
 
 	// chao sob o jogador, inclinacao e (se ha animacoes de viga) deteccao da viga
@@ -2763,6 +2854,7 @@ namespace
 		{
 			static const DWORD kTick[3] = { 50, 33, 20 };
 			Sleep(kTick[g_cfg.envPerf]);
+			PerfLog();
 			if(!scanned && g_gameLive) { scanned = true; EnvScanDemand(); }
 			if(g_envDead || !g_cfg.envProbe || !g_gameLive || !g_taskIface) continue;
 			if(InterlockedExchange(&g_envQueued, 1) == 0) g_taskIface->AddTask(new EnvTask());
@@ -2824,6 +2916,21 @@ namespace
 		return 0;
 	}
 
+	// v0.23.0: a mascara Keytrace so e necessaria em combate: arma sacada e lock proprio/externo ligado
+	static bool KtCombatActive()
+	{
+		if(!g_cfg.keytraceCombatOnly) return true;
+		if(!(g_lockOwn || g_lockActive)) return false;
+		bool drawn = false;
+		__try
+		{
+			PlayerCharacter * pl = Engine::Player();
+			drawn = pl && pl->actorState.IsWeaponDrawn();
+		}
+		__except(EXCEPTION_EXECUTE_HANDLER) { drawn = false; }
+		return drawn;
+	}
+
 	DWORD WINAPI DmkThread(LPVOID)
 	{
 		int lastDir = -1, lastCam = -1;
@@ -2831,10 +2938,11 @@ namespace
 		int camVal = 0;
 		for(;;)
 		{
-			Sleep((g_cfg.dmkCompat || g_cfg.dmkKeytrace) ? 8 : 100);
+			const bool ktOn = g_cfg.dmkKeytrace && g_cfg.enabled && g_gameLive && KtCombatActive();
+			Sleep((g_cfg.dmkCompat || ktOn) ? 8 : 50);
 			const DWORD now = GetTickCount();
 			int dir = 0, cam = 0;
-			if(g_cfg.enabled && g_gameLive && ((g_cfg.dmkCompat && g_dmkReady && g_taskIface) || g_cfg.dmkKeytrace))
+			if(g_cfg.enabled && g_gameLive && ((g_cfg.dmkCompat && g_dmkReady && g_taskIface) || ktOn))
 			{
 				DmkCompute(now, &dir, &cam, &camVal, &camTick);
 			}
@@ -2882,7 +2990,7 @@ namespace
 	{
 		for(;;)
 		{
-			Sleep(g_fastHold ? 1 : 10);
+			Sleep(g_fastHold ? PerfFastMin() : 10);
 			if(!g_fastHold || GetTickCount() - g_fastHoldTick > 120) continue;
 			__try
 			{
@@ -3943,7 +4051,7 @@ namespace
 
 		for(;;)
 		{
-			Sleep((g_active || g_lockOwn || g_fastHold) ? (DWORD)g_cfg.updateMs : 12);
+			Sleep((g_active || g_lockOwn || g_fastHold) ? (DWORD)(g_cfg.updateMs > (int)PerfTurnMin() ? g_cfg.updateMs : (int)PerfTurnMin()) : 12);
 			const DWORD now = GetTickCount();
 			float dt = (now - last) / 1000.0f;
 			last = now;
@@ -4859,13 +4967,17 @@ namespace
 				InputEventDispatcher * dispatcher = *g_inputEventDispatcher;
 				if(!dispatcher) { _MESSAGE("input dispatcher not available - the mod will not work"); break; }
 				dispatcher->AddEventSink(&g_sink);
-				CreateThread(NULL, 0, TurnThread, NULL, 0, NULL);
-				CreateThread(NULL, 0, MvThread, NULL, 0, NULL);
-				CreateThread(NULL, 0, HoldThread, NULL, 0, NULL);
+				g_thr[kThrTurn] = CreateThread(NULL, 0, TurnThread, NULL, 0, NULL);
+				g_thr[kThrMv] = CreateThread(NULL, 0, MvThread, NULL, 0, NULL);
+				g_thr[kThrHold] = CreateThread(NULL, 0, HoldThread, NULL, 0, NULL);
 				DmkInit();
-				CreateThread(NULL, 0, DmkThread, NULL, 0, NULL);
-				CreateThread(NULL, 0, EnvThread, NULL, 0, NULL);
-				CreateThread(NULL, 0, EnvJumpThread, NULL, 0, NULL);
+				g_thr[kThrDmk] = CreateThread(NULL, 0, DmkThread, NULL, 0, NULL);
+				g_thr[kThrEnv] = CreateThread(NULL, 0, EnvThread, NULL, 0, NULL);
+				g_thr[kThrJump] = CreateThread(NULL, 0, EnvJumpThread, NULL, 0, NULL);
+				// as threads que nao sao criticas correm com prioridade abaixo do normal
+				if(g_thr[kThrDmk]) SetThreadPriority(g_thr[kThrDmk], THREAD_PRIORITY_BELOW_NORMAL);
+				if(g_thr[kThrEnv]) SetThreadPriority(g_thr[kThrEnv], THREAD_PRIORITY_BELOW_NORMAL);
+				if(g_thr[kThrJump]) SetThreadPriority(g_thr[kThrJump], THREAD_PRIORITY_BELOW_NORMAL);
 				_MESSAGE("input receiver registered, turn thread started");
 				break;
 			}
