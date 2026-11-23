@@ -36,7 +36,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.23.0 (desempenho: ritmo por modo, medicao de CPU, Keytrace so em combate; bonus de salto de obstaculo)"
+#define PLUGIN_VERSION_STR	"0.23.1 (ritmo adaptativo: rapido em combate; pagina Ambiente no menu)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -1573,8 +1573,10 @@ namespace
 	DWORD			g_perfLast = 0;
 
 	// v0.23.0: ritmo minimo (ms) das threads rapidas por modo de desempenho (0 leve, 1 normal, 2 potente) e medicao de CPU por thread
-	inline DWORD PerfTurnMin() { static const DWORD k[3] = { 4, 2, 1 }; int m = g_cfg.envPerf; return k[m < 0 ? 0 : (m > 2 ? 2 : m)]; }
-	inline DWORD PerfFastMin() { static const DWORD k[3] = { 3, 2, 1 }; int m = g_cfg.envPerf; return k[m < 0 ? 0 : (m > 2 ? 2 : m)]; }
+	// v0.23.1: em combate (lock proprio/externo ou sessao de combate ativa) as threads correm sempre ao ritmo maximo (1 ms); o modo so afecta o resto do tempo
+	inline bool PerfCombat() { return g_lockOwn || g_lockActive || g_active; }
+	inline DWORD PerfTurnMin() { if(PerfCombat()) return 1; static const DWORD k[3] = { 4, 2, 1 }; int m = g_cfg.envPerf; return k[m < 0 ? 0 : (m > 2 ? 2 : m)]; }
+	inline DWORD PerfFastMin() { if(PerfCombat()) return 1; static const DWORD k[3] = { 3, 2, 1 }; int m = g_cfg.envPerf; return k[m < 0 ? 0 : (m > 2 ? 2 : m)]; }
 	enum { kThrTurn, kThrMv, kThrHold, kThrDmk, kThrEnv, kThrJump, kThrN };
 	HANDLE			g_thr[kThrN];
 	const char * const kThrNames[kThrN] = { "turn", "move", "hold", "dmk", "env", "jump" };
