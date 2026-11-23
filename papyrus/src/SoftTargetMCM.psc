@@ -57,7 +57,7 @@ EndEvent
 ; Page names follow the chosen language (they refresh the next time the menu is opened).
 Function SetPageNames()
 	lang = SoftTargetNative.GetInt("Language")
-	Pages = new string[7]
+	Pages = new string[8]
 	Pages[0] = T("General", "Geral")
 	Pages[1] = T("Lock-On", "Lock-On")
 	Pages[2] = T("On-screen dot", "Ponto no ecrã")
@@ -65,6 +65,7 @@ Function SetPageNames()
 	Pages[4] = T("Combos and turning", "Combos e giro")
 	Pages[5] = T("Camera and movement", "Câmera e movimento")
 	Pages[6] = T("Magic aim", "Mira da magia")
+	Pages[7] = T("Environment (RaySense)", "Ambiente (RaySense)")
 EndFunction
 
 string Function T(string en, string pt)
@@ -250,8 +251,10 @@ Event OnPageReset(string a_page)
 		PageBody()
 	elseIf p == 5
 		PageCamera()
-	else
+	elseIf p == 6
 		PageMagic()
+	else
+		PageEnv()
 	endIf
 EndEvent
 
@@ -496,6 +499,26 @@ Function PageDot()
 	AddSliderRow("DotSize", T("Size", "Tamanho"), 30.0, 400.0, 10.0, 100.0, 1.0, 0, "{0} %", T("Size of the indicator.", "Tamanho do indicador."))
 	AddSliderRow("DotOpacity", T("Opacity", "Opacidade"), 10.0, 100.0, 5.0, 100.0, 1.0, 0, "{0} %", T("How solid the indicator is.", "Quão opaco é o indicador."))
 	AddSliderRow("DotTdmType", T("Coeus-style reticle type", "Tipo da retícula estilo Coeus"), 0.0, 2.0, 1.0, 1.0, 1.0, 1, "{0}", T("Reticle type passed to the reticle widget (0, 1 or 2). Only used with the Coeus-style reticle.", "Tipo de retícula passado ao widget da retícula (0, 1 ou 2). Só é usado com a retícula estilo Coeus."))
+EndFunction
+
+Function PageEnv()
+	AddHeaderOption(T("Environment sensors (RaySense style)", "Sensores do ambiente (estilo RaySense)"))
+	AddEmptyOption()
+	AddToggleRow("EnvProbe", T("Environment sensors", "Sensores do ambiente"), 1.0, T("Reads obstacles, walls, ledges, slope and beams around you and publishes them to SoftTargetEnv.esp for the jump / cover / beam animation packs. Off = nothing is read and those packs do nothing.", "Lê obstáculos, paredes, saliências, inclinação e vigas à tua volta e publica-os no SoftTargetEnv.esp para os pacotes de animação de salto, cobertura e viga. Desligado = nada é lido e esses pacotes não fazem nada."))
+	AddSliderRow("EnvPerformance", T("Sensor mode (0 light, 1 normal, 2 powerful)", "Modo dos sensores (0 leve, 1 normal, 2 potente)"), 0.0, 2.0, 1.0, 0.0, 1.0, 1, "{0}", T("How often the sensors read. Light is for weak PCs. In combat the turning threads always run at full speed.", "Com que frequência os sensores leem. Leve é para PCs fracos. Em combate as threads de giro correm sempre à velocidade máxima."))
+	AddToggleRow("EnvDemandScan", T("Run only the sensors the animations use", "Só correr os sensores que as animações usam"), 1.0, T("At load, reads the OAR configs and skips sensor groups no animation needs. Applies on the next game start.", "Ao carregar, lê as configs do OAR e salta os grupos de sensores que nenhuma animação usa. Aplica-se no próximo arranque do jogo."))
+	AddToggleRow("EnvInCombat", T("Also read in combat", "Ler também em combate"), 0.0, T("Off by default to keep combat light. Turn on if you want obstacle jumps and cover during fights.", "Desligado por omissão para manter o combate leve. Liga se quiseres saltos de obstáculo e cobertura durante lutas."))
+	AddHeaderOption(T("Obstacle jump", "Salto de obstáculo"))
+	AddEmptyOption()
+	AddToggleRow("EnvJumpObstacle", T("Obstacle jump state", "Estado de salto de obstáculo"), 1.0, T("Keeps ST_JumpObstacle on during a jump started in front of an obstacle (used by the fall and land animations).", "Mantém ST_JumpObstacle ligado durante um salto iniciado diante de um obstáculo (usado pelas animações de queda e aterragem)."))
+	AddToggleRow("ObstacleJumpBonus", T("Higher jump over obstacles", "Salto mais alto sobre obstáculos"), 1.0, T("Raises the jump height only when an obstacle is in front. Normal jumps are not changed.", "Aumenta a altura do salto só quando há um obstáculo à frente. Os saltos normais não mudam."))
+	AddSliderRow("JumpObstacleMin", T("Minimum obstacle height", "Altura mínima do obstáculo"), 20.0, 200.0, 2.0, 66.0, 1.0, 0, "{0}", T("Obstacles lower than this are jumped normally. RaySense uses 66.", "Obstáculos mais baixos que isto são saltados normalmente. O RaySense usa 66."))
+	AddSliderRow("ObstacleJumpMinDistance", T("Minimum distance to the obstacle", "Distância mínima ao obstáculo"), 0.0, 300.0, 5.0, 70.0, 1.0, 0, "{0}", T("Closer than this the obstacle jump does not apply (FreeRun climbs instead). Raise it if FreeRun and the jump collide.", "Mais perto que isto o salto de obstáculo não se aplica (o FreeRun escala). Aumenta se o FreeRun e o salto colidirem."))
+	AddSliderRow("ObstacleJumpClearance", T("Clearance above the top", "Folga acima do topo"), 0.0, 100.0, 5.0, 25.0, 1.0, 0, "{0}", T("Extra height above the obstacle top the jump aims for.", "Altura extra acima do topo do obstáculo que o salto procura."))
+	AddSliderRow("ObstacleJumpMaxMult", T("Largest jump multiplier", "Maior multiplicador do salto"), 1.0, 4.0, 0.1, 2.5, 1.0, 0, "{1}", T("Upper limit of the jump height multiplier.", "Limite máximo do multiplicador da altura do salto."))
+	AddHeaderOption(T("Combat weight", "Peso em combate"))
+	AddEmptyOption()
+	AddToggleRow("KeytraceCombatOnly", T("Keytrace only in combat", "Keytrace só em combate"), 1.0, T("The Keytrace mask is only computed with a weapon drawn and a locked target.", "A máscara Keytrace só é calculada com arma sacada e um alvo travado."))
 EndFunction
 
 Function PageMagic()
