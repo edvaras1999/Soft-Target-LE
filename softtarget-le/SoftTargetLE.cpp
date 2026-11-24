@@ -21,6 +21,7 @@
 #include "skse/PapyrusNativeFunctions.h"
 #include "skse/Hooks_UI.h"
 #include "skse/GameThreads.h"
+#include "skse/GameSettings.h"
 #include "skse/GameData.h"
 #include "skse/GameExtraData.h"
 #include "skse/SafeWrite.h"
@@ -36,7 +37,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.24.1 (vertical da camera livre calibrado, viga mais robusta, diagnostico)"
+#define PLUGIN_VERSION_STR	"0.25.0 (lock sem atraso com arco, trilho da viga, tempo de frame, escritor unico opcional)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -180,6 +181,11 @@ namespace
 		int		noAmmoGuard;		// 1 = arco sem flechas equipadas nao conta como "a mirar"
 		int		lockCamLimit;		// 1 = limita a inclinacao da camera de 3a pessoa com o lock (evita chao / 1a pessoa)
 		float	lockCamUpDeg;		// maximo a olhar para cima, graus
+		int		lockBowInstant;		// v0.25.0: 1 = com o arco puxado a camera do lock segue o alvo sem atraso (a previsao so serve assim)
+		int		lockArrowTilt;		// v0.25.0: 1 = com o lock e um arco, a flecha sai mais reta (INI f1P/f3PArrowTiltUpAngle), reposto ao largar
+		int		beamRail;			// v0.25.0: 1 = em cima da viga o movimento lateral e removido (trilho) e o jogador e puxado ao centro
+		int		frameLog;			// v0.25.0: 1 = regista o tempo de frame no log (para comparar com os sensores ligados/desligados)
+		int		singleWriter;		// v0.25.0: 1 = as escritas da camera do lock fazem-se uma vez por frame, na thread do jogo
 		// ---- v0.19.0
 		int		envProbe;			// 1 = sensores do ambiente (chao, inclinacao, obstaculos a frente, saliencia): log + globais do SoftTargetEnv.esp
 		// ---- v0.20.0
@@ -327,6 +333,11 @@ namespace
 		{ "NoAmmoGuard",			'i', &g_cfg.noAmmoGuard,		1.0f },
 		{ "LockCamLimit",			'i', &g_cfg.lockCamLimit,		1.0f },
 		{ "LockCamUpDegrees",		'f', &g_cfg.lockCamUpDeg,		40.0f },
+		{ "LockBowInstant",		'i', &g_cfg.lockBowInstant,	1.0f },
+		{ "LockArrowTilt",			'i', &g_cfg.lockArrowTilt,		1.0f },
+		{ "BeamRail",				'i', &g_cfg.beamRail,			1.0f },
+		{ "FrameTimeLog",			'i', &g_cfg.frameLog,			1.0f },
+		{ "SingleRotationWriter",	'i', &g_cfg.singleWriter,		0.0f },
 		{ "EnvProbe",				'i', &g_cfg.envProbe,			1.0f },
 		{ "EnvJumpObstacle",		'i', &g_cfg.envJump,			1.0f },
 		{ "EnvInCombat",			'i', &g_cfg.envInCombat,		0.0f },
@@ -1274,6 +1285,79 @@ namespace
 		return want;
 	}
 
+	// ------------------------------------------------------------------ tarefa por frame (v0.25.0)
+	// Corre na thread do jogo, uma vez por frame: (1) aplica as escritas adiadas (SingleRotationWriter), (2) mede o tempo de frame.
+	volatile LONG	g_frameQueued = 0;
+	volatile LONG	g_deferLock = 0;
+	struct DeferSlot { float * a; float v; };
+	DeferSlot		g_defer[16];
+	int				g_deferN = 0;
+	volatile LONG	g_railOn = 0;				// v0.25.0: trilho da viga ativo
+	volatile DWORD	g_railTick = 0;
+	volatile LONG	g_envNeedMirror = 0;		// espelho de g_envNeed so para o log do frame
+
+	class FrameTask : public TaskDelegate
+	{
+	public:
+		virtual void Run(void);
+		virtual void Dispose(void) { delete this; }
+	};
+
+	void FrameQueue()
+	{
+		if(g_taskIface && InterlockedExchange(&g_frameQueued, 1) == 0) g_taskIface->AddTask(new FrameTask());
+	}
+
+	// Com SingleRotationWriter ligado a escrita fica guardada (a ultima por endereco) e e aplicada no proximo frame; senao e imediata.
+	void DeferF(float * addr, float val)
+	{
+		if(!g_cfg.singleWriter || !g_taskIface) { *addr = val; return; }
+		while(InterlockedExchange(&g_deferLock, 1)) Sleep(0);
+		int i = 0;
+		for(; i < g_deferN; ++i) if(g_defer[i].a == addr) break;
+		if(i == g_deferN && g_deferN < 16) { g_defer[i].a = addr; ++g_deferN; }
+		if(i < 16) g_defer[i].v = val;
+		InterlockedExchange(&g_deferLock, 0);
+		FrameQueue();
+	}
+
+	void FrameTask::Run(void)
+	{
+		DeferSlot loc[16]; int n = 0;
+		while(InterlockedExchange(&g_deferLock, 1)) Sleep(0);
+		for(int i = 0; i < g_deferN; ++i) loc[n++] = g_defer[i];
+		g_deferN = 0;
+		InterlockedExchange(&g_deferLock, 0);
+		__try { for(int i = 0; i < n; ++i) *loc[i].a = loc[i].v; }
+		__except(EXCEPTION_EXECUTE_HANDLER) { }
+		if(g_cfg.frameLog)
+		{
+			static LARGE_INTEGER s_last = {0}, s_freq = {0};
+			static double s_sum = 0.0, s_max = 0.0; static int s_cnt = 0, s_o33 = 0, s_o50 = 0, s_lines = 0; static DWORD s_t0 = 0;
+			LARGE_INTEGER t; QueryPerformanceCounter(&t);
+			if(!s_freq.QuadPart) QueryPerformanceFrequency(&s_freq);
+			if(s_last.QuadPart && s_freq.QuadPart)
+			{
+				const double ms = (double)(t.QuadPart - s_last.QuadPart) * 1000.0 / (double)s_freq.QuadPart;
+				if(ms < 1000.0) { s_sum += ms; ++s_cnt; if(ms > s_max) s_max = ms; if(ms > 33.4) ++s_o33; if(ms > 50.0) ++s_o50; }
+			}
+			s_last = t;
+			const DWORD now = GetTickCount();
+			if(!s_t0) s_t0 = now;
+			if((DWORD)(now - s_t0) >= 10000)
+			{
+				if(s_cnt > 0 && s_lines < 200)
+				{
+					++s_lines;
+					_MESSAGE("frametime: 10 s: avg %.1f ms (%.0f fps), worst %.0f ms, frames over 33 ms: %d, over 50 ms: %d | sensors mask 0x%X, lock %d, beam rail %d",
+							 s_sum / s_cnt, 1000.0 / (s_sum / s_cnt), s_max, s_o33, s_o50, (unsigned)g_envNeedMirror, (int)g_lockOwn, (int)g_railOn);
+				}
+				s_sum = 0.0; s_max = 0.0; s_cnt = 0; s_o33 = 0; s_o50 = 0; s_t0 = now;
+			}
+		}
+		InterlockedExchange(&g_frameQueued, 0);
+	}
+
 
 	// Camera de deslocamento (perfil TDM): com a rotacao livre ligada (byte 0xB4, ligado pelo Coeus) a camera fica em
 	// corpo + deslocamento (0xAC). Quando NOS giramos o corpo 'step', tira-se o mesmo ao deslocamento: a camera fica
@@ -2102,20 +2186,24 @@ namespace
 		__except(EXCEPTION_EXECUTE_HANDLER) { g_mvFound = 0; g_mvLN = 0; g_mvRegion = -1; g_mvWord = -1; }
 	}
 
+	void MvRail(float camYaw, float bodyYaw);
 	DWORD WINAPI MvThread(LPVOID)
 	{
 		for(;;)
 		{
-			Sleep((g_mvLearnState || g_mvWant) ? PerfFastMin() : 10);
+			Sleep((g_mvLearnState || g_mvWant || g_railOn) ? PerfFastMin() : 10);
 			if(g_mvLearnState == 1 || g_mvLearnState == 2) { MvLearn(GetTickCount()); continue; }
-			if(!g_mvFound || !g_mvWant || GetTickCount() - g_mvWantTick > 120) { g_mvHaveLast = 0; continue; }
+			const bool railNow = g_railOn && (DWORD)(GetTickCount() - g_railTick) <= 120;
+			const bool remapNow = g_mvWant && (DWORD)(GetTickCount() - g_mvWantTick) <= 120;
+			if(!g_mvFound || (!remapNow && !railNow)) { g_mvHaveLast = 0; continue; }
 			__try
 			{
 				PlayerCharacter * player = Engine::Player();
 				if(!player) continue;
 				float o[3], d[3];
 				if(!CameraRay(player, o, d)) continue;
-				MvApply(atan2f(d[0], d[1]), Engine::Rotation(player).z);
+				if(remapNow) MvApply(atan2f(d[0], d[1]), Engine::Rotation(player).z);
+				if(railNow) MvRail(atan2f(d[0], d[1]), Engine::Rotation(player).z);
 			}
 			__except(EXCEPTION_EXECUTE_HANDLER) { }
 		}
@@ -2742,6 +2830,52 @@ namespace
 	volatile LONG	g_beamOk = 0;
 	volatile DWORD	g_beamTick = 0;
 	volatile float	g_beamHead = 0.0f, g_beamLat = 0.0f, g_beamHalf = 30.0f;
+
+	// v0.25.0: TRILHO da viga. Le o vetor de movimento que o motor vai usar (o mesmo que o MvApply escreve), tira-lhe a componente
+	// perpendicular ao eixo da viga e acrescenta uma pequena correcao para o centro. E idempotente (pode correr a cada ms).
+	// O vetor esta no referencial do corpo (camera livre / remap) ou da camera (jogo normal).
+	void MvRail(float camYaw, float bodyYaw)
+	{
+		if(!g_mvFound || g_mvLN < 1) return;
+		static int s_logs = 0; static DWORD s_lt = 0;
+		UInt8 * cs = ThirdPersonStatePtr();
+		const bool camRel = (g_mvWant != 0) ? false : (cs && !*(cs + 0xB4));
+		const float ref = camRel ? camYaw : bodyYaw;
+		__try
+		{
+			int n = 0;
+			UInt32 * b0 = MvBase(g_mvLR[0], &n);
+			if(!b0 || g_mvLW[0] + 1 >= n) return;
+			const float * v0 = (const float *)(b0 + g_mvLW[0]);
+			const float ix = g_mvLS[0] ? v0[1] : v0[0], iy = g_mvLS[0] ? v0[0] : v0[1];
+			const float len = sqrtf(ix * ix + iy * iy);
+			if(!(len == len) || len < 0.2f || len > 1.6f) return;
+			const float a = WrapPi(g_beamHead - ref);
+			const float sa = sinf(a), ca = cosf(a);
+			const float along = ix * sa + iy * ca;
+			const float lat = g_beamLat;
+			const float dz = 6.0f;
+			float corr = fabsf(lat) <= dz ? 0.0f : (lat - (lat > 0.0f ? dz : -dz)) / 24.0f;
+			if(corr > 1.0f) corr = 1.0f; if(corr < -1.0f) corr = -1.0f;
+			corr *= 0.6f * (len > 1.0f ? 1.0f : len);
+			float nx = along * sa + corr * ca, ny = along * ca - corr * sa;
+			const float nl2 = sqrtf(nx * nx + ny * ny);
+			if(nl2 > 1.0f) { nx /= nl2; ny /= nl2; }
+			const float lateralIn = ix * ca - iy * sa;
+			const DWORD now = GetTickCount();
+			if(s_logs < 40 && fabsf(lateralIn) > 0.2f && (DWORD)(now - s_lt) >= 600) { s_lt = now; ++s_logs; _MESSAGE("beam rail: sideways input %.2f removed, pull to centre %.2f (frame %s)", lateralIn, corr, camRel ? "camera" : "body"); }
+			const int cnt = g_mvLN;
+			for(int k = 0; k < cnt; ++k)
+			{
+				int nn = 0;
+				UInt32 * b = MvBase(g_mvLR[k], &nn);
+				if(!b || g_mvLW[k] + 1 >= nn) continue;
+				float * v = (float *)(b + g_mvLW[k]);
+				v[0] = g_mvLS[k] ? ny : nx; v[1] = g_mvLS[k] ? nx : ny;
+			}
+		}
+		__except(EXCEPTION_EXECUTE_HANDLER) { }
+	}
 	static bool BeamCenterAt(PlayerCharacter * player, const EnvPos & e, float fwd, float h0, float * c, float * half)
 	{
 		const float cx = e.pos.x + e.fx * fwd, cy = e.pos.y + e.fy * fwd;
@@ -3224,8 +3358,38 @@ namespace
 
 	// v0.18.2: camera de 3a pessoa com o lock. Limita o olhar para cima (camera ao chao / a entrar na 1a pessoa por colisao)
 	// e regista 3 s de diagnostico depois de ligar o lock (estado da camera, distancia, inclinacao).
+	// v0.25.0: com o lock e um arco a flecha sai mais reta (valores do mod antigo: arco 0.5/0.0, o jogo usa maiores), reposto ao largar.
+	void ArrowTiltTick(PlayerCharacter * player)
+	{
+		static bool s_on = false, s_fail = false; static float s_o1 = 0.0f, s_o3 = 0.0f; static Setting * s1 = NULL, * s3 = NULL;
+		if(s_fail) return;
+		const bool want = g_cfg.lockArrowTilt && g_lockOwn && BowEquipped(player);
+		if(want == s_on) return;
+		__try
+		{
+			if(want)
+			{
+				s1 = GetINISetting("f1PArrowTiltUpAngle:Combat"); s3 = GetINISetting("f3PArrowTiltUpAngle:Combat");
+				if(!s1 || !s3) { s_fail = true; _MESSAGE("arrowtilt: the game settings were not found - the option stays off"); return; }
+				s_o1 = *(float *)((UInt8 *)s1 + 4); s_o3 = *(float *)((UInt8 *)s3 + 4);
+				*(float *)((UInt8 *)s1 + 4) = 0.5f; *(float *)((UInt8 *)s3 + 4) = 0.0f;
+				s_on = true;
+				_MESSAGE("arrowtilt: ON (1st person %.2f -> 0.50, 3rd person %.2f -> 0.00)", s_o1, s_o3);
+			}
+			else
+			{
+				if(s1) *(float *)((UInt8 *)s1 + 4) = s_o1;
+				if(s3) *(float *)((UInt8 *)s3 + 4) = s_o3;
+				s_on = false;
+				_MESSAGE("arrowtilt: restored (%.2f / %.2f)", s_o1, s_o3);
+			}
+		}
+		__except(EXCEPTION_EXECUTE_HANDLER) { s_fail = true; s_on = false; }
+	}
+
 	void LockCamGuard(PlayerCharacter * player, DWORD now, bool apply)
 	{
+		ArrowTiltTick(player);
 		static bool s_prev = false; static DWORD s_t0 = 0, s_last = 0; static int s_logs = 0; static int s_clampLogs = 0;
 		const bool on = g_lockOwn != 0;
 		if(on && !s_prev) { s_t0 = now; s_last = 0; }
@@ -3242,6 +3406,26 @@ namespace
 				{
 					if(s_clampLogs < 20) { ++s_clampLogs; _MESSAGE("lockcam: camera pitch %.1f deg looks too far up - limited to %.0f deg", cp * 57.2958f, -g_cfg.lockCamUpDeg); }
 					*(float *)(cs + 0x54) = -up; *(float *)(cs + 0x58) = -up;
+				}
+			}
+			{
+				// v0.25.0: com o arco puxado regista os campos da camera de 3a pessoa (0x3C..0x6C, 0xAC, 0xB0) e a distancia real:
+				// mostra qual campo se mexe quando a camera "se afasta" ao puxar o arco.
+				static DWORD s_zl = 0; static int s_zn = 0;
+				if(cs && s_zn < 150 && BowAiming(player) && (DWORD)(now - s_zl) >= 150)
+				{
+					s_zl = now; ++s_zn;
+					PlayerCamera * zc = PlayerCamera::GetSingleton();
+					float zd = -1.0f;
+					if(zc && zc->cameraNode)
+					{
+						const NiPoint3 pp = Engine::Position(player); const NiPoint3 cp3 = zc->cameraNode->m_worldTransform.pos;
+						zd = sqrtf((pp.x - cp3.x) * (pp.x - cp3.x) + (pp.y - cp3.y) * (pp.y - cp3.y) + (pp.z - cp3.z) * (pp.z - cp3.z));
+					}
+					_MESSAGE("zoomdump: camDist %.1f | 3C %.2f 40 %.2f 44 %.2f 48 %.2f 4C %.2f 50 %.2f 54 %.3f 58 %.3f 5C %.3f 60 %.3f 64 %.2f 68 %.2f 6C %.2f | AC %.3f B0 %.3f B4 %d",
+							 zd, *(float *)(cs + 0x3C), *(float *)(cs + 0x40), *(float *)(cs + 0x44), *(float *)(cs + 0x48), *(float *)(cs + 0x4C), *(float *)(cs + 0x50),
+							 *(float *)(cs + 0x54), *(float *)(cs + 0x58), *(float *)(cs + 0x5C), *(float *)(cs + 0x60), *(float *)(cs + 0x64), *(float *)(cs + 0x68), *(float *)(cs + 0x6C),
+							 *(float *)(cs + 0xAC), *(float *)(cs + 0xB0), (int)*(cs + 0xB4));
 				}
 			}
 			if((DWORD)(now - s_t0) < 3000 && (DWORD)(now - s_last) >= 100 && s_logs < 300)
@@ -4242,9 +4426,10 @@ namespace
 		const float eff = fabsf(err) <= dz ? 0.0f : err - (err > 0.0f ? dz : -dz);
 		const float step = StepToward(0.0f, eff, false, dtc, camMax, camSmooth);
 		c.lastCmd = step;
-		*dx += c.sign * step;
-		if(*dx >  1.2f) *dx =  1.2f;
-		if(*dx < -1.2f) *dx = -1.2f;
+		float nv = *dx + c.sign * step;
+		if(nv >  1.2f) nv =  1.2f;
+		if(nv < -1.2f) nv = -1.2f;
+		DeferF(dx, nv);
 	}
 
 	void FreeCamPitchStep(UInt8 * cs, PlayerCharacter * player, float dt, float camMax, float camSmooth, float dz)
@@ -4310,7 +4495,26 @@ namespace
 	{
 		static bool s_on = false; static int s_method = -1; static float s_cmd = 0.0f, s_ray0 = 0.0f; static DWORD s_t0 = 0; static int s_sw = 0, s_lg = 0;
 		static DWORD s_lastOk = 0, s_dg = 0; static int s_dn = 0;
-		const bool ok = g_cfg.beamAssist && g_envOnBeam && g_beamOk && (DWORD)(now - g_beamTick) < 1000 && g_moveHeld && !g_lockOwn && !g_active && !IsMountedCam();
+		static float s_ppx = 0.0f, s_ppy = 0.0f; static DWORD s_pt = 0, s_mvT = 0;
+		g_envNeedMirror = g_envNeed;
+		{
+			// v0.25.0: "andar" tambem se mede pelo deslocamento real (as teclas nem sempre chegam ao nosso leitor)
+			const NiPoint3 pp = Engine::Position(player);
+			if(!s_pt) { s_ppx = pp.x; s_ppy = pp.y; s_pt = now; }
+			else if((DWORD)(now - s_pt) >= 100)
+			{
+				const float dx = pp.x - s_ppx, dy = pp.y - s_ppy;
+				if(sqrtf(dx * dx + dy * dy) / ((float)(DWORD)(now - s_pt) * 0.001f) > 20.0f) s_mvT = now;
+				s_ppx = pp.x; s_ppy = pp.y; s_pt = now;
+			}
+		}
+		const bool movingNow = g_moveHeld || (DWORD)(now - s_mvT) < 300;
+		{
+			const bool railOk = g_cfg.beamRail && g_envOnBeam && g_beamOk && (DWORD)(now - g_beamTick) < 1000 && g_es.ok0 && g_es.vertPlayer < 15.0f && !IsMountedCam();
+			if(railOk) { g_railTick = now; if(!g_railOn) _MESSAGE("beam rail: ON"); g_railOn = 1; }
+			else { if(g_railOn) _MESSAGE("beam rail: OFF"); g_railOn = 0; }
+		}
+		const bool ok = g_cfg.beamAssist && g_envOnBeam && g_beamOk && (DWORD)(now - g_beamTick) < 1000 && movingNow && !g_lockOwn && !g_active && !IsMountedCam();
 		if(!ok)
 		{
 			// so desliga (e regista) depois de 400 ms seguidos sem condicoes: evita o liga/desliga a cada passo
@@ -4345,7 +4549,7 @@ namespace
 		if(s_method == 1 && cs)
 		{
 			float c = WrapPi(*(float *)(cs + 0x5C) + step);
-			*(float *)(cs + 0x5C) = c; *(float *)(cs + 0x60) = c;
+			DeferF((float *)(cs + 0x5C), c); DeferF((float *)(cs + 0x60), c);
 		}
 		else
 		{
@@ -4386,6 +4590,7 @@ namespace
 			float dt = (now - last) / 1000.0f;
 			last = now;
 			if(dt > 0.1f) dt = 0.1f;
+			if(g_cfg.frameLog && g_gameLive) FrameQueue();
 
 			// v0.16.2: mod desligado no MCM, jogo ainda a carregar ou menu aberto: nao se mexe em nada.
 			if(!g_cfg.enabled || !g_gameLive || (now - g_liveTick) < 1500)
@@ -4811,10 +5016,17 @@ namespace
 					// Com o arco puxado (FreeCam) a camera centra o alvo a partir da posicao REAL da camera, mais depressa e sem zona morta.
 					// v0.16.3: com o arco (puxado, ou equipado no modo de vista presa) a correcao e sempre suave, nunca o salto do Hard.
 					const bool gentle = bowLockCam || (viewCtl && softBow);
-					const float gainC = gentle ? 0.8f : 0.5f;
-					const float camSmooth = gentle ? (g_cfg.lockCameraSmooth > 14.0f ? g_cfg.lockCameraSmooth : 14.0f) : (viewCtl ? softSm : g_cfg.lockCameraSmooth);
+					// v0.25.0: com o arco puxado a camera segue o alvo SEM atraso (so assim a previsao da flecha acerta alvos em movimento);
+					// nos primeiros 200 ms depois de puxar ha um "encaixe" imediato no alvo (em vez de a camera o alcancar aos poucos).
+					static DWORD s_bowSnapUntil = 0; static bool s_bowPrev = false;
+					const bool instBow = bowLockCam && g_cfg.lockBowInstant;
+					if(instBow && !s_bowPrev) s_bowSnapUntil = now + 200;
+					s_bowPrev = instBow;
+					const bool snapNow = instBow && (LONG)(s_bowSnapUntil - now) > 0;
+					const float gainC = instBow ? 1.0f : (gentle ? 0.8f : 0.5f);
+					const float camSmooth = instBow ? (snapNow ? 400.0f : 120.0f) : (gentle ? (g_cfg.lockCameraSmooth > 14.0f ? g_cfg.lockCameraSmooth : 14.0f) : (viewCtl ? softSm : g_cfg.lockCameraSmooth));
 					const float dzRad = viewCtl ? softDz : (bowLockCam ? 0.0f : g_cfg.camDeadZoneDeg * kPi / 180.0f);
-					const float camMax = gentle ? maxRad : (viewCtl ? softMax : maxRad);
+					const float camMax = instBow ? 25.0f : (gentle ? maxRad : (viewCtl ? softMax : maxRad));
 					UInt8 * cs = ThirdPersonStatePtr();
 					if(cs)
 					{
@@ -4855,8 +5067,8 @@ namespace
 							if(!camHold)
 							{
 								cy = WrapPi(cy + StepToward(cy, wantYaw, true, dtc, camMax, camSmooth));
-								*(float *)(cs + 0x5C) = cy;
-								*(float *)(cs + 0x60) = cy;
+								DeferF((float *)(cs + 0x5C), cy);
+								DeferF((float *)(cs + 0x60), cy);
 							}
 						}
 						else
@@ -4885,7 +5097,7 @@ namespace
 									else want = WrapPi(*off + err - (err > 0.0f ? dzO : -dzO));
 								}
 								else want = *off;
-								*off = WrapPi(*off + StepToward(*off, want, true, dt, camMax, camSmooth));
+								DeferF(off, WrapPi(*off + StepToward(*off, want, true, dt, camMax, camSmooth)));
 							}
 							else
 							{
@@ -4937,8 +5149,8 @@ namespace
 								else want = cp + dp - (dp > 0.0f ? dzp : -dzp);
 							}
 							cp += StepToward(cp, want, false, dtb, camMax, camSmooth);
-							*(float *)(cs + 0x54) = cp;
-							*(float *)(cs + 0x58) = cp;
+							DeferF((float *)(cs + 0x54), cp);
+							DeferF((float *)(cs + 0x58), cp);
 						}
 					}
 				}
