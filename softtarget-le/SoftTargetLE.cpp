@@ -21,7 +21,6 @@
 #include "skse/PapyrusNativeFunctions.h"
 #include "skse/Hooks_UI.h"
 #include "skse/GameThreads.h"
-#include "skse/GameSettings.h"
 #include "skse/GameData.h"
 #include "skse/GameExtraData.h"
 #include "skse/SafeWrite.h"
@@ -3359,9 +3358,54 @@ namespace
 	// v0.18.2: camera de 3a pessoa com o lock. Limita o olhar para cima (camera ao chao / a entrar na 1a pessoa por colisao)
 	// e regista 3 s de diagnostico depois de ligar o lock (estado da camera, distancia, inclinacao).
 	// v0.25.0: com o lock e um arco a flecha sai mais reta (valores do mod antigo: arco 0.5/0.0, o jogo usa maiores), reposto ao largar.
+	// Procura no processo o objeto "Setting" de uma definicao INI pelo nome (vtable, valor, ponteiro do nome) e devolve o endereco do valor.
+	static float * FindIniSettingValue(const char * name)
+	{
+		const size_t len = strlen(name) + 1;
+		UInt32 strAt[4]; int ns = 0;
+		const UInt32 lo = 0x00400000, hi = 0x02400000;
+		__try
+		{
+			MEMORY_BASIC_INFORMATION mi;
+			for(UInt32 a = lo; a < hi && ns < 4; )
+			{
+				if(!VirtualQuery((void *)a, &mi, sizeof(mi))) break;
+				const UInt32 b = (UInt32)mi.BaseAddress, e = b + (UInt32)mi.RegionSize;
+				if(mi.State == MEM_COMMIT && !(mi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) && e - b >= len)
+				{
+					for(UInt32 q = b; q + len <= e && ns < 4; ++q)
+						if(*(const char *)q == name[0] && memcmp((const void *)q, name, len) == 0) strAt[ns++] = q;
+				}
+				a = e > a ? e : a + 0x1000;
+			}
+			for(int k = 0; k < ns; ++k)
+			{
+				for(UInt32 a = lo; a < hi; )
+				{
+					if(!VirtualQuery((void *)a, &mi, sizeof(mi))) break;
+					const UInt32 b = (UInt32)mi.BaseAddress, e = b + (UInt32)mi.RegionSize;
+					if(mi.State == MEM_COMMIT && (mi.Protect & (PAGE_READWRITE | PAGE_WRITECOPY)) && !(mi.Protect & PAGE_GUARD))
+					{
+						for(UInt32 q = (b + 3) & ~3u; q + 4 <= e; q += 4)
+						{
+							if(*(const UInt32 *)q == strAt[k] && q >= b + 8)
+							{
+								const UInt32 vt = *(const UInt32 *)(q - 8);
+								if(vt >= lo && vt < hi) return (float *)(q - 4);
+							}
+						}
+					}
+					a = e > a ? e : a + 0x1000;
+				}
+			}
+		}
+		__except(EXCEPTION_EXECUTE_HANDLER) { }
+		return NULL;
+	}
+
 	void ArrowTiltTick(PlayerCharacter * player)
 	{
-		static bool s_on = false, s_fail = false; static float s_o1 = 0.0f, s_o3 = 0.0f; static Setting * s1 = NULL, * s3 = NULL;
+		static bool s_on = false, s_fail = false; static float s_o1 = 0.0f, s_o3 = 0.0f; static float * s1 = NULL, * s3 = NULL;
 		if(s_fail) return;
 		const bool want = g_cfg.lockArrowTilt && g_lockOwn && BowEquipped(player);
 		if(want == s_on) return;
@@ -3369,17 +3413,17 @@ namespace
 		{
 			if(want)
 			{
-				s1 = GetINISetting("f1PArrowTiltUpAngle:Combat"); s3 = GetINISetting("f3PArrowTiltUpAngle:Combat");
+				if(!s1) s1 = FindIniSettingValue("f1PArrowTiltUpAngle:Combat"); if(!s3) s3 = FindIniSettingValue("f3PArrowTiltUpAngle:Combat");
 				if(!s1 || !s3) { s_fail = true; _MESSAGE("arrowtilt: the game settings were not found - the option stays off"); return; }
-				s_o1 = *(float *)((UInt8 *)s1 + 4); s_o3 = *(float *)((UInt8 *)s3 + 4);
-				*(float *)((UInt8 *)s1 + 4) = 0.5f; *(float *)((UInt8 *)s3 + 4) = 0.0f;
+				s_o1 = *s1; s_o3 = *s3;
+				*s1 = 0.5f; *s3 = 0.0f;
 				s_on = true;
 				_MESSAGE("arrowtilt: ON (1st person %.2f -> 0.50, 3rd person %.2f -> 0.00)", s_o1, s_o3);
 			}
 			else
 			{
-				if(s1) *(float *)((UInt8 *)s1 + 4) = s_o1;
-				if(s3) *(float *)((UInt8 *)s3 + 4) = s_o3;
+				if(s1) *s1 = s_o1;
+				if(s3) *s3 = s_o3;
 				s_on = false;
 				_MESSAGE("arrowtilt: restored (%.2f / %.2f)", s_o1, s_o3);
 			}
