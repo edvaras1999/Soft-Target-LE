@@ -36,7 +36,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.24.0 (lock no cavalo, vertical da camera livre, ignorar essenciais; vigas; novas animacoes)"
+#define PLUGIN_VERSION_STR	"0.24.1 (vertical da camera livre calibrado, viga mais robusta, diagnostico)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -2738,6 +2738,7 @@ namespace
 
 	// v0.24.0: geometria da viga. Em cada distancia a frente amostra o chao a 13 desvios laterais (-48..+48 passo 8): "na viga" = chao a +-25 do chao do jogador.
 	// Devolve o centro lateral (positivo = direita do jogador) e a meia-largura; false se nao ha viga (ou e uma superficie larga).
+	volatile float	g_dbgCliff = 0.0f, g_dbgDepth = 0.0f;
 	volatile LONG	g_beamOk = 0;
 	volatile DWORD	g_beamTick = 0;
 	volatile float	g_beamHead = 0.0f, g_beamLat = 0.0f, g_beamHalf = 30.0f;
@@ -2790,17 +2791,31 @@ namespace
 		EnvSet(kEnvOnBeam, g_envOnBeam ? 1.0f : 0.0f);
 		if(g_cfg.beamAssist && (g_envOnBeam || cand))
 		{
-			float c0 = 0.0f, w0 = 0.0f, c1 = 0.0f, w1 = 0.0f;
-			if(BeamCenterAt(player, e, 0.0f, h0, &c0, &w0) && BeamCenterAt(player, e, 70.0f, h0, &c1, &w1))
+			// v0.24.1: as sondas seguem o eixo da viga ja conhecido (e nao a frente do corpo), por isso continuam a ver a viga mesmo
+			// quando o jogador esta torto em relacao a ela. Sonda para a frente e para tras; o eixo vem da linha dos centros.
+			EnvPos f = e;
+			const bool haveAx = g_beamOk && (DWORD)(tn - g_beamTick) < 1000;
+			if(haveAx) { const float sh = sinf(g_beamHead), ch = cosf(g_beamHead); f.fx = sh; f.fy = ch; f.rx = ch; f.ry = -sh; }
+			float c0 = 0.0f, w0 = 0.0f, cp = 0.0f, wp = 0.0f, cm = 0.0f, wm = 0.0f;
+			if(BeamCenterAt(player, f, 0.0f, h0, &c0, &w0))
 			{
-				const float vx = e.fx * 70.0f + e.rx * (c1 - c0), vy = e.fy * 70.0f + e.ry * (c1 - c0);
-				g_beamHead = atan2f(vx, vy); g_beamLat = c0; g_beamHalf = w0; g_beamTick = tn; g_beamOk = 1;
-				static DWORD s_bl = 0; static int s_bn = 0;
-				if(s_bn < 80 && (DWORD)(tn - s_bl) >= 700) { s_bl = tn; ++s_bn; _MESSAGE("beam: heading %.0f deg, centre %.0f to the %s, half-width %.0f", g_beamHead * 57.2958f, fabsf(c0), c0 >= 0.0f ? "right" : "left", w0); }
+				const bool okp = BeamCenterAt(player, f, 70.0f, h0, &cp, &wp);
+				const bool okm = BeamCenterAt(player, f, -70.0f, h0, &cm, &wm);
+				if(okp || okm)
+				{
+					const float lo = okm ? -70.0f : 0.0f, loC = okm ? cm : c0, hi = okp ? 70.0f : 0.0f, hiC = okp ? cp : c0;
+					const float vx = f.fx * (hi - lo) + f.rx * (hiC - loC), vy = f.fy * (hi - lo) + f.ry * (hiC - loC);
+					float head = atan2f(vx, vy);
+					if(haveAx) head = WrapPi(g_beamHead + WrapPi(head - g_beamHead) * 0.5f);
+					// lateral em relacao ao eixo: positivo = o centro da viga esta a direita de quem anda no sentido do eixo
+					const float lat = c0 * (f.rx * cosf(head) - f.ry * sinf(head));
+					g_beamHead = head; g_beamLat = lat; g_beamHalf = w0; g_beamTick = tn; g_beamOk = 1;
+					static DWORD s_bl = 0; static int s_bn = 0;
+					if(s_bn < 80 && (DWORD)(tn - s_bl) >= 700) { s_bl = tn; ++s_bn; _MESSAGE("beam: axis %.0f deg, centre %.0f to the %s of the axis, half-width %.0f (probes %s%s)", head * 57.2958f, fabsf(lat), lat >= 0.0f ? "right" : "left", w0, okm ? "back " : "", okp ? "front" : ""); }
+				}
 			}
-			else g_beamOk = 0;
 		}
-		else g_beamOk = 0;
+		if(!g_envOnBeam) g_beamOk = 0;
 	}
 
 	// terreno a frente: 80 (diferenca de elevacao) e 150 (inclinacao em ponto mais largo)
@@ -2824,7 +2839,7 @@ namespace
 			if(drop > cliff) cliff = drop;
 		}
 		if(cliff > 1500.0f) cliff = 1500.0f;
-		EnvSet(34, cliff);
+		EnvSet(34, cliff); g_dbgCliff = cliff;
 	}
 
 	// paredes em 5 direcoes (frente, diagonais, lados) a 80 de altura, ate 100 de distancia; so superficies quase verticais; 999 = sem parede
@@ -2871,7 +2886,7 @@ namespace
 			}
 		}
 		g_es.ledgeH = lh; g_es.ledgeD = ld;
-		EnvSet(9, lh); EnvSet(10, ld); EnvSet(35, ldep);
+		EnvSet(9, lh); EnvSet(10, ld); EnvSet(35, ldep); g_dbgDepth = ldep;
 	}
 
 	void EnvMeasure()
@@ -2939,15 +2954,15 @@ namespace
 			static int s_k[14]; int k[14];
 			k[0] = (int)g_es.obsType; k[1] = (int)(g_es.heldH / 10.0f); k[2] = (int)(g_es.vertFront / 20.0f); k[3] = (int)(g_es.vertPlayer / 20.0f); k[4] = (int)(g_es.slope / 5.0f); k[5] = (int)(g_es.macro / 5.0f);
 			k[6] = (int)(g_es.wall[0] / 20.0f); k[7] = (int)(g_es.wall[3] / 20.0f); k[8] = (int)(g_es.wall[4] / 20.0f); k[9] = (int)(g_es.ledgeH / 10.0f); k[10] = (int)(g_es.ledgeD / 10.0f);
-			k[11] = (int)(g_es.wall[1] / 20.0f) * 64 + (int)(g_es.wall[2] / 20.0f); k[12] = (int)g_es.wtype[3] * 256 + (int)g_es.wtype[4]; k[13] = g_envOnBeam;
+			k[11] = (int)(g_es.wall[1] / 20.0f) * 64 + (int)(g_es.wall[2] / 20.0f); k[12] = (int)g_es.wtype[3] * 256 + (int)g_es.wtype[4]; k[13] = g_envOnBeam * 100 + (int)(g_dbgCliff / 100.0f) * 10 + (int)(g_dbgDepth / 2.0f);
 			bool changed = false;
 			for(int i = 0; i < 14; ++i) if(k[i] != s_k[i]) { changed = true; s_k[i] = k[i]; }
 			if(changed && g_envLogN < 500)
 			{
 				++g_envLogN;
-				_MESSAGE("env: type %.0f obstacle %.0f (raw %.0f) | front %.0f player %.0f slope %.0f macro %.0f | walls F/FL/FR/L/R %.0f/%.0f/%.0f/%.0f/%.0f (types L/R %.0f/%.0f) | ledge %.0f at %.0f | beam %d | knee/waist/head %.0f/%.0f/%.0f (layers %u/%u/%u)",
+				_MESSAGE("env: type %.0f obstacle %.0f (raw %.0f) | front %.0f player %.0f slope %.0f macro %.0f | walls F/FL/FR/L/R %.0f/%.0f/%.0f/%.0f/%.0f (types L/R %.0f/%.0f) | ledge %.0f at %.0f | beam %d | cliff %.0f depth %.0f | knee/waist/head %.0f/%.0f/%.0f (layers %u/%u/%u)",
 						 g_es.obsType, g_es.heldH, g_es.obsRaw, g_es.vertFront, g_es.vertPlayer, g_es.slope, g_es.macro, g_es.wall[0], g_es.wall[1], g_es.wall[2], g_es.wall[3], g_es.wall[4], g_es.wtype[3], g_es.wtype[4],
-						 g_es.ledgeH, g_es.ledgeD, (int)g_envOnBeam, g_es.fd[0], g_es.fd[1], g_es.fd[2], (unsigned)g_es.fl[0], (unsigned)g_es.fl[1], (unsigned)g_es.fl[2]);
+						 g_es.ledgeH, g_es.ledgeD, (int)g_envOnBeam, (float)g_dbgCliff, (float)g_dbgDepth, g_es.fd[0], g_es.fd[1], g_es.fd[2], (unsigned)g_es.fl[0], (unsigned)g_es.fl[1], (unsigned)g_es.fl[2]);
 			}
 		}
 		__except(EXCEPTION_EXECUTE_HANDLER)
@@ -4209,6 +4224,29 @@ namespace
 	// ------------------------------------------------------------------ v0.24.0: camera livre e camera do cavalo
 	// Com a camera livre (byte 0xB4 ligado: Coeus / TDM / cavalo) o jogo usa deslocamentos em relacao ao corpo: 0xAC = giro, 0xB0 = inclinacao
 	// (positivo = olhar para baixo). Escrever em 0x54/0x58 nao mexia na vista vertical nesse modo. A correcao usa a direcao REAL da camera.
+	// v0.24.1: o sinal de 0xB0 nao e o que se supunha (no log, diffRotX negativo = olhar para baixo na camera livre de 3a pessoa). Em vez de
+	// supor, o sinal e calibrado: se a camera se mover ao contrario do comando 3 leituras seguidas, o sinal inverte-se (fica no log).
+	struct PitchCal { float sign; float lastRay; float lastCmd; int bad; bool have; DWORD t0; };
+	static void PitchCalStep(float * dx, PitchCal & c, float rayUp, float err, float camMax, float camSmooth, float dz, const char * tag)
+	{
+		const DWORD now = GetTickCount();
+		float dtc = c.have ? (float)(DWORD)(now - c.t0) * 0.001f : 0.016f;
+		if(dtc < 0.001f) dtc = 0.001f; if(dtc > 0.05f) dtc = 0.05f;
+		if(c.have && fabsf(c.lastCmd) > 0.0035f)
+		{
+			const float obs = rayUp - c.lastRay;
+			if(obs * c.lastCmd < 0.0f && fabsf(obs) > 0.002f) { if(++c.bad >= 3) { c.sign = -c.sign; c.bad = 0; _MESSAGE("%s: pitch sign set to %+.0f (the camera moved against the command)", tag, c.sign); } }
+			else if(obs * c.lastCmd > 0.0f) c.bad = 0;
+		}
+		c.lastRay = rayUp; c.t0 = now; c.have = true;
+		const float eff = fabsf(err) <= dz ? 0.0f : err - (err > 0.0f ? dz : -dz);
+		const float step = StepToward(0.0f, eff, false, dtc, camMax, camSmooth);
+		c.lastCmd = step;
+		*dx += c.sign * step;
+		if(*dx >  1.2f) *dx =  1.2f;
+		if(*dx < -1.2f) *dx = -1.2f;
+	}
+
 	void FreeCamPitchStep(UInt8 * cs, PlayerCharacter * player, float dt, float camMax, float camSmooth, float dz)
 	{
 		float o[3], dd[3];
@@ -4216,23 +4254,19 @@ namespace
 		float * dx = (float *)(cs + 0xB0);
 		const float hr = sqrtf(dd[0] * dd[0] + dd[1] * dd[1]);
 		const float rayUp = atan2f(dd[2], hr > 0.0001f ? hr : 0.0001f);
+		static float s_ray = 1000.0f; static DWORD s_t = 0;
+		const DWORD now = GetTickCount();
+		if(fabsf(rayUp - s_ray) < 0.00002f && (DWORD)(now - s_t) < 33) return;		// so uma correcao por leitura nova da camera
+		s_ray = rayUp; s_t = now;
 		const float hx = g_aimX - o[0], hy = g_aimY - o[1];
 		const float hh = sqrtf(hx * hx + hy * hy);
 		const float aimUp = atan2f(g_aimZ - o[2], hh > 1.0f ? hh : 1.0f);
-		const float rotx = Engine::Rotation(player).x;
-		static float s_ray = 1000.0f, s_r0 = 0.0f, s_rx0 = 0.0f, s_dx0 = 0.0f; static bool s_have = false;
-		if(!s_have || fabsf(rayUp - s_ray) >= 0.00002f) { s_ray = rayUp; s_r0 = rayUp; s_rx0 = rotx; s_dx0 = *dx; s_have = true; }
-		const float predUp = s_r0 - (rotx - s_rx0) - (*dx - s_dx0);
-		const float err = aimUp - predUp;
+		const float err = aimUp - rayUp;
 		g_ctrErrPitch = err;
-		const float eff = fabsf(err) <= dz ? 0.0f : err - (err > 0.0f ? dz : -dz);
-		const float step = StepToward(0.0f, eff, false, dt, camMax, camSmooth);
-		*dx -= step;
-		if(*dx >  1.2f) *dx =  1.2f;
-		if(*dx < -1.2f) *dx = -1.2f;
+		static PitchCal s_cal = { 1.0f, 0.0f, 0.0f, 0, false, 0 };
+		PitchCalStep(dx, s_cal, rayUp, err, camMax, camSmooth, dz, "freepitch");
 		static DWORD s_log = 0; static int s_n = 0;
-		const DWORD now = GetTickCount();
-		if(s_n < 60 && (DWORD)(now - s_log) >= 500) { s_log = now; ++s_n; _MESSAGE("freepitch: aim vs centre %.2f deg | ray elevation %.1f deg, aim elevation %.1f deg, diffRotX %.1f deg", err * 57.2958f, rayUp * 57.2958f, aimUp * 57.2958f, *dx * 57.2958f); }
+		if(s_n < 80 && (DWORD)(now - s_log) >= 500) { s_log = now; ++s_n; _MESSAGE("freepitch: aim vs centre %.2f deg | ray elevation %.1f deg, aim elevation %.1f deg, diffRotX %.1f deg, sign %+.0f", err * 57.2958f, rayUp * 57.2958f, aimUp * 57.2958f, *dx * 57.2958f, s_cal.sign); }
 	}
 
 	// Cavalo: a camera do cavalo e livre (0xB4). Guia-se giro (0xAC) e inclinacao (0xB0) pela direcao real da camera; o corpo e o cavalo nao giram.
@@ -4259,9 +4293,8 @@ namespace
 		float * offZ = (float *)(hs + 0xAC);
 		float * offX = (float *)(hs + 0xB0);
 		*offZ = WrapPi(*offZ + StepToward(0.0f, ey, true, dtc, camMax, camSmooth));
-		*offX -= StepToward(0.0f, ep, false, dtc, camMax, camSmooth);
-		if(*offX >  1.2f) *offX =  1.2f;
-		if(*offX < -1.2f) *offX = -1.2f;
+		static PitchCal s_calH = { -1.0f, 0.0f, 0.0f, 0, false, 0 };
+		PitchCalStep(offX, s_calH, rayUp, errPitch, camMax, camSmooth, dz, "mounted");
 		static DWORD s_log = 0; static int s_n = 0;
 		if(s_n < 200 && (DWORD)(now - s_log) >= 400)
 		{
@@ -4276,19 +4309,24 @@ namespace
 	void BeamSteerTick(PlayerCharacter * player, float dt, DWORD now)
 	{
 		static bool s_on = false; static int s_method = -1; static float s_cmd = 0.0f, s_ray0 = 0.0f; static DWORD s_t0 = 0; static int s_sw = 0, s_lg = 0;
-		const bool ok = g_cfg.beamAssist && g_envOnBeam && g_beamOk && (DWORD)(now - g_beamTick) < 800 && g_moveHeld && !g_lockOwn && !g_active && !IsMountedCam();
+		static DWORD s_lastOk = 0, s_dg = 0; static int s_dn = 0;
+		const bool ok = g_cfg.beamAssist && g_envOnBeam && g_beamOk && (DWORD)(now - g_beamTick) < 1000 && g_moveHeld && !g_lockOwn && !g_active && !IsMountedCam();
 		if(!ok)
 		{
-			if(s_on) { s_on = false; _MESSAGE("beam: assist OFF"); }
+			// so desliga (e regista) depois de 400 ms seguidos sem condicoes: evita o liga/desliga a cada passo
+			if(s_on && (DWORD)(now - s_lastOk) > 400) { s_on = false; _MESSAGE("beam: assist OFF"); }
+			if(g_envOnBeam && !s_on && s_dn < 40 && (DWORD)(now - s_dg) >= 1500) { s_dg = now; ++s_dn; _MESSAGE("beam: on a beam but not steering: assist %d beamOk %d age %u ms, keys held %d, lock %d, session %d, mounted %d", g_cfg.beamAssist, (int)g_beamOk, (unsigned)(now - g_beamTick), (int)g_moveHeld, (int)g_lockOwn, (int)g_active, (int)IsMountedCam()); }
 			s_t0 = 0; s_cmd = 0.0f;
 			return;
 		}
+		s_lastOk = now;
 		float o[3], d[3];
 		if(!CameraRay(player, o, d)) return;
 		const float cy = atan2f(d[0], d[1]);
 		float head = g_beamHead;
-		if(fabsf(WrapPi(cy - head)) > kPi * 0.5f) head = WrapPi(head + kPi);
-		float ln = g_beamLat / (g_beamHalf > 8.0f ? g_beamHalf : 8.0f);
+		float latSign = 1.0f;
+		if(fabsf(WrapPi(cy - head)) > kPi * 0.5f) { head = WrapPi(head + kPi); latSign = -1.0f; }
+		float ln = latSign * g_beamLat / (g_beamHalf > 8.0f ? g_beamHalf : 8.0f);
 		if(ln > 1.0f) ln = 1.0f; if(ln < -1.0f) ln = -1.0f;
 		const float dzn = g_cfg.beamDead;
 		ln = fabsf(ln) <= dzn ? 0.0f : (ln - (ln > 0.0f ? dzn : -dzn)) / (1.0f - dzn);
