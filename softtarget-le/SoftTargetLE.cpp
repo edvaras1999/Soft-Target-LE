@@ -36,7 +36,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.26.1 (paredes sem atraso, objetos finos, zona de borda, salto na viga, Edge acima da viga)"
+#define PLUGIN_VERSION_STR	"0.26.2 (viga converte o movimento, guarda de borda gradual, fim da viga, parede com histerese)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -183,6 +183,7 @@ namespace
 		int		lockBowInstant;		// v0.25.0: 1 = com o arco puxado a camera do lock segue o alvo sem atraso (a previsao so serve assim)
 		int		lockArrowTilt;		// v0.25.0: 1 = com o lock e um arco, a flecha sai mais reta (INI f1P/f3PArrowTiltUpAngle), reposto ao largar
 		int		beamRail;			// v0.25.0: 1 = em cima da viga o movimento lateral e removido (trilho) e o jogador e puxado ao centro
+		int		beamEnd;			// v0.26.2: 1 = no fim da viga o movimento abranda e para (soltar e premir outra vez deixa-te cair)
 		int		edgeZone;			// v0.26.1: 1 = a menos de ~35 unidades de uma queda >=100 em chao plano, BeamWalkOnBeam=1 (animacoes da viga na ponta)
 		int		edgeGuard;			// v0.26.1: 1 = na zona de borda (queda a <20) o movimento em direcao a queda e removido (saltar solta-te)
 		int		envThin;			// v0.26.1: 1 = leque extra de raios (+-10/20 graus) para paredes finas, pilares e troncos
@@ -339,6 +340,7 @@ namespace
 		{ "LockBowInstant",		'i', &g_cfg.lockBowInstant,	1.0f },
 		{ "LockArrowTilt",			'i', &g_cfg.lockArrowTilt,		1.0f },
 		{ "BeamRail",				'i', &g_cfg.beamRail,			1.0f },
+		{ "BeamEndSlow",			'i', &g_cfg.beamEnd,			1.0f },
 		{ "EdgeZone",				'i', &g_cfg.edgeZone,			1.0f },
 		{ "EdgeGuard",				'i', &g_cfg.edgeGuard,		1.0f },
 		{ "EnvThinFan",			'i', &g_cfg.envThin,			1.0f },
@@ -1307,6 +1309,8 @@ namespace
 	volatile LONG	g_guardMask = 0;			// v0.26.1: bits (0-7) das direcoes com queda a <20 (cada bit = base + k*45 graus)
 	volatile float	g_guardBase = 0.0f;
 	volatile DWORD	g_guardTick = 0;
+	volatile float	g_guardDist[8] = { 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f };	// v0.26.2: distancia a queda em cada direcao (15/30/R)
+	volatile float	g_endF[2] = { 1.0f, 1.0f };	// v0.26.2: fator de velocidade no fim da viga (sentido do eixo / contrario)
 	volatile LONG	g_leapOn = 0;				// v0.26.1: BeamWalkLeap (ligado pela tecla de salto ou pelo estado de ar)
 	volatile DWORD	g_leapTick = 0;
 	volatile LONG	g_envEdgeZone = 0;			// v0.26.1: zona de borda (publica BeamWalkOnBeam)
@@ -2213,7 +2217,7 @@ namespace
 			if(g_mvLearnState == 1 || g_mvLearnState == 2) { MvLearn(GetTickCount()); continue; }
 			const bool railNow = g_railOn && (DWORD)(GetTickCount() - g_railTick) <= 120;
 			const bool remapNow = g_mvWant && (DWORD)(GetTickCount() - g_mvWantTick) <= 120;
-			const bool guardNow = g_cfg.edgeGuard && g_guardMask && (DWORD)(GetTickCount() - g_guardTick) <= 800;
+			const bool guardNow = g_cfg.edgeGuard && g_guardMask && (DWORD)(GetTickCount() - g_guardTick) <= 400;
 			if(!g_mvFound || (!remapNow && !railNow && !guardNow)) { g_mvHaveLast = 0; continue; }
 			__try
 			{
@@ -2882,10 +2886,27 @@ namespace
 			const float * v0 = (const float *)(b0 + g_mvLW[0]);
 			const float ix = g_mvLS[0] ? v0[1] : v0[0], iy = g_mvLS[0] ? v0[0] : v0[1];
 			const float len = sqrtf(ix * ix + iy * iy);
-			if(!(len == len) || len < 0.2f || len > 1.6f) return;
+			static DWORD s_relT = 0, s_allowUntil = 0; static bool s_stopped = false;
+			if(!(len == len) || len < 0.2f) { if(s_stopped) { s_allowUntil = GetTickCount() + 1500; s_stopped = false; } return; }
+			if(len > 1.6f) return;
 			const float a = WrapPi(g_railHead - ref);
 			const float sa = sinf(a), ca = cosf(a);
-			const float along = ix * sa + iy * ca;
+			float along = ix * sa + iy * ca;
+			{
+				// v0.26.2: CONVERTE em vez de remover - o input que vai de lado vira movimento ao longo da viga (no sentido da tua intencao),
+				// com pelo menos 60% da velocidade. Antes um eixo perpendicular ao input anulava o movimento e ficavas parado.
+				const float sg = along >= 0.0f ? 1.0f : -1.0f; float aa = fabsf(along); const float mn = 0.6f * len; if(aa < mn) aa = mn;
+				along = sg * aa;
+				// fim da viga: abranda (70 -> 60%, 50 -> 35%) e para (30 -> 0); soltar e premir de novo liberta 1,5 s
+				if(g_cfg.beamEnd)
+				{
+					const float ef = g_endF[along >= 0.0f ? 0 : 1];
+					if(ef < 0.999f && (int)(GetTickCount() - s_allowUntil) >= 0)
+					{
+						along *= ef; if(ef <= 0.0f) s_stopped = true;
+					}
+				}
+			}
 			const float lat = g_railLat;
 			const float dz = 3.0f;
 			float corr = fabsf(lat) <= dz ? 0.0f : (lat - (lat > 0.0f ? dz : -dz)) / 16.0f;
@@ -2909,11 +2930,12 @@ namespace
 		}
 		__except(EXCEPTION_EXECUTE_HANDLER) { }
 	}
-	// v0.26.1: EdgeGuard - junto a uma queda (<20 unidades) remove-se a parte do movimento que vai em direcao a queda (saltar solta-te)
+	// v0.26.2: EdgeGuard gradual - a parte do movimento que vai em direcao a uma queda e atenuada conforme a distancia (50 -> 12 unidades:
+	// 100% -> 0%); o movimento ao longo da borda fica intacto (deslizas). O fator suaviza-se (EMA ~120 ms) para nao tremer.
 	void MvGuard(float camYaw, float bodyYaw)
 	{
 		if(!g_mvFound || g_mvLN < 1) return;
-		static int s_logs = 0; static DWORD s_lt = 0;
+		static int s_logs = 0; static DWORD s_lt = 0, s_tt = 0; static float s_f[8] = { 1, 1, 1, 1, 1, 1, 1, 1 };
 		UInt8 * cs = ThirdPersonStatePtr();
 		const bool camRel = (g_mvWant != 0) ? false : (cs && !*(cs + 0xB4));
 		const float ref = camRel ? camYaw : bodyYaw;
@@ -2926,19 +2948,24 @@ namespace
 			const float ix = g_mvLS[0] ? v0[1] : v0[0], iy = g_mvLS[0] ? v0[0] : v0[1];
 			const float len = sqrtf(ix * ix + iy * iy);
 			if(!(len == len) || len < 0.2f || len > 1.6f) return;
-			float nx = ix, ny = iy; bool ch = false;
+			const DWORD now = GetTickCount();
+			const DWORD dtm = s_tt ? (DWORD)(now - s_tt) : 1000; s_tt = now;
+			const float al = dtm > 300 ? 1.0f : 1.0f - expf(-(float)dtm / 120.0f);
+			float nx = ix, ny = iy; bool ch = false; float minf = 1.0f;
 			const unsigned m = (unsigned)g_guardMask;
 			for(int k = 0; k < 8; ++k)
 			{
-				if(!(m & (1u << k))) continue;
+				float tf = 1.0f;
+				if(m & (1u << k)) { tf = (g_guardDist[k] - 12.0f) / 38.0f; if(tf < 0.0f) tf = 0.0f; if(tf > 1.0f) tf = 1.0f; }
+				s_f[k] += (tf - s_f[k]) * al;
+				if(s_f[k] >= 0.98f) continue;
 				const float a = WrapPi(g_guardBase + (float)k * 0.7853982f - ref);
 				const float sa = sinf(a), ca = cosf(a);
 				const float toward = nx * sa + ny * ca;
-				if(toward > 0.05f) { nx -= toward * sa; ny -= toward * ca; ch = true; }
+				if(toward > 0.05f) { const float rm = toward * (1.0f - s_f[k]); nx -= rm * sa; ny -= rm * ca; ch = true; if(s_f[k] < minf) minf = s_f[k]; }
 			}
 			if(!ch) return;
-			const DWORD now = GetTickCount();
-			if(s_logs < 30 && (DWORD)(now - s_lt) >= 1000) { s_lt = now; ++s_logs; _MESSAGE("edge guard: movement towards the drop removed (mask %02X)", m); }
+			if(s_logs < 40 && (DWORD)(now - s_lt) >= 1000) { s_lt = now; ++s_logs; _MESSAGE("edge guard: movement towards the drop reduced to %.0f%% (mask %02X)", minf * 100.0f, m); }
 			for(int k = 0; k < g_mvLN; ++k)
 			{
 				int nn = 0;
@@ -2984,36 +3011,39 @@ namespace
 		g_es.slope = acosf(nz0 > 1.0f ? 1.0f : (nz0 < -1.0f ? -1.0f : nz0)) * 57.2958f;
 		EnvSet(3, g_es.vertPlayer); EnvSet(4, g_es.slope);
 		if(!(g_envNeed & kNeedBeam)) return;
-		// v0.26.1: ZONA DE BORDA - em chao plano, queda >=100 a menos de 35 unidades (8 direcoes) = BeamWalkOnBeam=1 (animacoes da viga na ponta);
-		// queda >=100 a menos de 20 unidades = EdgeGuard (tira o movimento em direcao a queda). Debounce 150 ms / 300 ms.
+		// v0.26.2: ZONA DE BORDA com distancia a queda por direcao. 8 direcoes a 35 (50 se ja estiver ligada = histerese); onde ha queda >=100 refina-se
+		// a 30 e a 15. g_guardDist alimenta o EdgeGuard gradual.
 		{
 			static DWORD s_ezSince = 0, s_ezLost = 0;
 			const DWORD tz = GetTickCount();
-			bool ez = false; unsigned gm = 0;
-			float yawb = atan2f(e.fx, e.fy);
+			bool ez = false; unsigned gm = 0; float gd[8];
+			for(int k = 0; k < 8; ++k) gd[k] = 999.0f;
+			const float yawb = atan2f(e.fx, e.fy);
 			if(g_cfg.edgeZone && g_es.ok0 && g_es.slope < 30.0f && g_es.vertPlayer < 15.0f && !g_envAirState)
 			{
-				unsigned zm = 0;
+				const float R = g_envEdgeZone ? 50.0f : 35.0f;
 				for(int k = 0; k < 8; ++k)
 				{
 					const float ya = yawb + (float)k * 0.7853982f, sx = sinf(ya), sy = cosf(ya);
 					float hp = 0.0f;
-					const bool ok = EnvGroundH(player, e.pos.x + sx * 35.0f, e.pos.y + sy * 35.0f, e.pos.z, &hp, NULL);
+					bool ok = EnvGroundH(player, e.pos.x + sx * R, e.pos.y + sy * R, e.pos.z, &hp, NULL);
+					if(!(!ok || (h0 - hp) >= 100.0f)) continue;
+					float dist = R;
+					ok = EnvGroundH(player, e.pos.x + sx * 30.0f, e.pos.y + sy * 30.0f, e.pos.z, &hp, NULL);
 					if(!ok || (h0 - hp) >= 100.0f)
 					{
-						zm |= 1u << k;
-						float hq = 0.0f;
-						const bool okq = EnvGroundH(player, e.pos.x + sx * 20.0f, e.pos.y + sy * 20.0f, e.pos.z, &hq, NULL);
-						if(!okq || (h0 - hq) >= 100.0f) gm |= 1u << k;
+						dist = 30.0f;
+						ok = EnvGroundH(player, e.pos.x + sx * 15.0f, e.pos.y + sy * 15.0f, e.pos.z, &hp, NULL);
+						if(!ok || (h0 - hp) >= 100.0f) dist = 15.0f;
 					}
+					gd[k] = dist; gm |= 1u << k; ez = true;
 				}
-				ez = zm != 0;
 			}
 			if(ez) { if(!s_ezSince) s_ezSince = tz; s_ezLost = 0; }
 			else { s_ezSince = 0; if(!s_ezLost) s_ezLost = tz; }
 			if(ez && (DWORD)(tz - s_ezSince) >= 150 && !g_envEdgeZone) { g_envEdgeZone = 1; _MESSAGE("env: edge zone ON (drop within 35 units)"); }
 			else if(!ez && g_envEdgeZone && s_ezLost && (DWORD)(tz - s_ezLost) >= 300) { g_envEdgeZone = 0; _MESSAGE("env: edge zone OFF"); }
-			if(g_envEdgeZone && gm) { g_guardBase = yawb; g_guardMask = (LONG)gm; g_guardTick = tz; }
+			if(g_envEdgeZone && gm) { for(int k = 0; k < 8; ++k) g_guardDist[k] = gd[k]; g_guardBase = yawb; g_guardMask = (LONG)gm; g_guardTick = tz; }
 			else g_guardMask = 0;
 		}
 		// viga: chao pouco inclinado e queda >= 50 a pelo menos um dos lados (a 45 do centro), mantido 0.2 s
@@ -3027,10 +3057,10 @@ namespace
 		{
 			const float yaw0 = atan2f(e.fx, e.fy);
 			const bool known = g_beamOk && (DWORD)(tn - g_beamTick) < 1000;
-			const int nAng = known ? 1 : 4;
+			const int nAng = known ? 1 : 8;
 			for(int ai = 0; ai < nAng; ++ai)
 			{
-				const float ya = known ? g_beamHead : yaw0 + (float)ai * 0.7853982f;
+				const float ya = known ? g_beamHead : yaw0 + (float)ai * 0.3926991f;
 				EnvPos f = e; f.fx = sinf(ya); f.fy = cosf(ya); f.rx = f.fy; f.ry = -f.fx;
 				const bool okl = EnvGroundH(player, e.pos.x - f.rx * 70.0f, e.pos.y - f.ry * 70.0f, e.pos.z, &hl, NULL);
 				const bool okr = EnvGroundH(player, e.pos.x + f.rx * 70.0f, e.pos.y + f.ry * 70.0f, e.pos.z, &hr, NULL);
@@ -3074,6 +3104,30 @@ namespace
 			}
 		}
 		if(!g_envOnBeam) g_beamOk = 0;
+		// v0.26.2: fim da viga - 2 sondas a 35 e 70 ao longo do eixo (cada sentido) sobre a linha do centro; sem chao (ou queda >=50) = fim a vista
+		if(g_cfg.beamEnd && g_envOnBeam && g_beamOk)
+		{
+			const float sh = sinf(g_beamHead), ch = cosf(g_beamHead);
+			const float cx = e.pos.x + ch * g_beamLat, cy = e.pos.y - sh * g_beamLat;
+			for(int sd = 0; sd < 2; ++sd)
+			{
+				const float sg = sd ? -1.0f : 1.0f; float hh = 0.0f; float ef = 1.0f;
+				const bool o35 = EnvGroundH(player, cx + sh * 35.0f * sg, cy + ch * 35.0f * sg, e.pos.z, &hh, NULL);
+				if(!o35 || (h0 - hh) >= 50.0f) ef = 0.0f;
+				else
+				{
+					const bool o50 = EnvGroundH(player, cx + sh * 50.0f * sg, cy + ch * 50.0f * sg, e.pos.z, &hh, NULL);
+					if(!o50 || (h0 - hh) >= 50.0f) ef = 0.35f;
+					else
+					{
+						const bool o70 = EnvGroundH(player, cx + sh * 70.0f * sg, cy + ch * 70.0f * sg, e.pos.z, &hh, NULL);
+						if(!o70 || (h0 - hh) >= 50.0f) ef = 0.6f;
+					}
+				}
+				g_endF[sd] = ef;
+			}
+		}
+		else { g_endF[0] = 1.0f; g_endF[1] = 1.0f; }
 	}
 
 	// terreno a frente: 80 (diferenca de elevacao) e 150 (inclinacao em ponto mais largo)
@@ -3120,6 +3174,8 @@ namespace
 			if(EnvCast(player, e.pos.x, e.pos.y, e.pos.z + 80.0f, dx, dy, 0.0f, 100.0f, 3, &r) && r.hit && fabsf(r.nz) < 0.75f)
 			{ g_es.wall[i] = r.dist; g_es.wtype[i] = EnvClassify(r, refOk); }
 		}
+		// v0.26.2: histerese - uma parede vista ha menos de 300 ms mantem-se (o IdleTime do OAR nao reinicia por uma leitura falhada)
+		// (aplicada depois do leque)
 		// v0.26.1: objetos finos (pilares, troncos, paredes estreitas): leque extra de +-10/20 graus, so parado e sem nada no raio central
 		if(g_cfg.envThin && !e.moving && g_es.wall[0] > 100.0f)
 		{
@@ -3129,6 +3185,15 @@ namespace
 				const float dx = e.rx * kTA[i][0] + e.fx * kTA[i][1], dy = e.ry * kTA[i][0] + e.fy * kTA[i][1];
 				if(EnvCast(player, e.pos.x, e.pos.y, e.pos.z + 80.0f, dx, dy, 0.0f, 100.0f, 3, &r) && r.hit && fabsf(r.nz) < 0.75f && r.dist < g_es.wall[0])
 				{ g_es.wall[0] = r.dist; g_es.wtype[0] = EnvClassify(r, refOk); }
+			}
+		}
+		{
+			static float s_pv[5] = { 999, 999, 999, 999, 999 }, s_pt[5] = { 0, 0, 0, 0, 0 }; static DWORD s_tk[5] = { 0, 0, 0, 0, 0 };
+			const DWORD tw = GetTickCount();
+			for(int i = 0; i < 5; ++i)
+			{
+				if(g_es.wall[i] < 999.0f) { s_pv[i] = g_es.wall[i]; s_pt[i] = g_es.wtype[i]; s_tk[i] = tw; }
+				else if(s_pv[i] < 999.0f && (DWORD)(tw - s_tk[i]) <= 300) { g_es.wall[i] = s_pv[i]; g_es.wtype[i] = s_pt[i]; }
 			}
 		}
 		EnvSet(6, g_es.wall[0]); EnvSet(kEnvWallFL, g_es.wall[1]); EnvSet(kEnvWallFR, g_es.wall[2]); EnvSet(7, g_es.wall[3]); EnvSet(8, g_es.wall[4]);
@@ -3210,6 +3275,7 @@ namespace
 			const float fmx = g_frameMs;
 			const DWORD mulF = fmx > 33.0f ? (DWORD)(fmx / 33.0f > 4.0f ? 4.0f : fmx / 33.0f) : 1;
 			const DWORD mul = (g_envIdle ? 2 : 1) * (mulF < 1 ? 1 : mulF);
+			if((g_envOnBeam || g_envEdgeZone) && (g_envNeed & (kNeedGround | kNeedBeam)) && (int)(s_next[0] - now) > 80) s_next[0] = now + 80;	// v0.26.2: em viga/borda o chao le-se a cada ~80 ms
 			if(g_envAirState && (g_envNeed & (kNeedGround | kNeedBeam))) s_next[0] = now;		// no ar o chao le-se a cada ciclo (altura da queda)
 			const LONG need = g_envNeed;
 			++s_tick;
@@ -4749,6 +4815,18 @@ namespace
 		}
 		const bool movingNow = g_moveHeld || (DWORD)(now - s_mvT) < 300;
 		{
+			// v0.26.2: diagnostico a cada segundo enquanto estas numa viga / zona de borda
+			static DWORD s_dgT = 0; static int s_dgN = 0;
+			if((g_envOnBeam || g_envEdgeZone || g_railOn) && s_dgN < 600 && (DWORD)(now - s_dgT) >= 1000)
+			{
+				s_dgT = now; ++s_dgN;
+				float md = 999.0f; for(int k = 0; k < 8; ++k) if(((unsigned)g_guardMask & (1u << k)) && g_guardDist[k] < md) md = g_guardDist[k];
+				_MESSAGE("diag: beam %d ok %d rail %d zone %d | keys W%d S%d A%d D%d moved %d | end %.2f/%.2f guardMin %.0f | leap %d air %d | mv %d",
+						 (int)g_envOnBeam, (int)g_beamOk, (int)g_railOn, (int)g_envEdgeZone, (int)g_kFwd, (int)g_kBack, (int)g_kLeft, (int)g_kRight, (int)((DWORD)(now - s_mvT) < 300),
+						 (double)g_endF[0], (double)g_endF[1], (double)md, (int)g_leapOn, (int)g_envAirState, (int)g_mvFound);
+			}
+		}
+		{
 			// v0.25.1: o trilho guarda a LINHA da viga (centro + direcao) quando a deteta e mede o desvio pela posicao do jogador a cada ciclo.
 			// Fica ligado ate saltares / caires (sem chao ~120 ms) ou te afastares da linha mais de 45 unidades.
 			static bool s_rl = false; static float s_cx = 0.0f, s_cy = 0.0f, s_ch = 0.0f; static DWORD s_airSince = 0, s_lastFresh = 0, s_lastAir = 0;
@@ -5741,6 +5819,11 @@ namespace
 				else if(*control == strings->strafeRight)	g_kRight = held;
 				g_moveHeld = (g_kFwd || g_kBack || g_kLeft || g_kRight) ? 1 : 0;
 				// v0.26.1: BeamWalkLeap liga logo ao premir o salto em cima da viga / na zona de borda (antes de o jogo mudar de estado)
+				if(held && *control == strings->jump)
+				{
+					static int s_jk = 0;
+					if(s_jk < 30) { ++s_jk; _MESSAGE("input: jump key seen (beam %d zone %d leapOn %d)", (int)g_envOnBeam, (int)g_envEdgeZone, (int)g_leapOn); }
+				}
 				if(held && *control == strings->jump && !g_leapOn && (g_envOnBeam || g_envEdgeZone) && g_envG[kEnvBeamLeap] && g_cfg.envProbe)
 				{ g_leapOn = 1; g_leapTick = GetTickCount(); EnvSet(kEnvBeamLeap, 1.0f); _MESSAGE("env: BeamWalkLeap ON (jump key)"); }
 
