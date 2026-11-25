@@ -36,7 +36,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.25.0 (lock sem atraso com arco, trilho da viga, tempo de frame, escritor unico opcional)"
+#define PLUGIN_VERSION_STR	"0.26.0 (sensores adaptativos ao frame, viga e Edge separados, queda real, pack corrigido)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -1294,6 +1294,7 @@ namespace
 	DeferSlot		g_defer[16];
 	int				g_deferN = 0;
 	volatile float	g_frameMs = 20.0f;			// v0.25.1: tempo de frame medio (EMA)
+	volatile float	g_frameLastMs = 16.0f;		// v0.26.0: ultimo frame (para saltar solucos)
 	volatile float	g_railLat = 0.0f, g_railHead = 0.0f;
 	volatile LONG	g_railOn = 0;				// v0.25.0: trilho da viga ativo
 	volatile DWORD	g_railTick = 0;
@@ -1333,7 +1334,6 @@ namespace
 		InterlockedExchange(&g_deferLock, 0);
 		__try { for(int i = 0; i < n; ++i) *loc[i].a = loc[i].v; }
 		__except(EXCEPTION_EXECUTE_HANDLER) { }
-		if(g_cfg.frameLog || g_cfg.lockLatencyComp)
 		{
 			static LARGE_INTEGER s_last = {0}, s_freq = {0};
 			static double s_sum = 0.0, s_max = 0.0; static int s_cnt = 0, s_o33 = 0, s_o50 = 0, s_lines = 0; static DWORD s_t0 = 0;
@@ -1342,6 +1342,7 @@ namespace
 			if(s_last.QuadPart && s_freq.QuadPart)
 			{
 				const double ms = (double)(t.QuadPart - s_last.QuadPart) * 1000.0 / (double)s_freq.QuadPart;
+				g_frameLastMs = (float)ms;
 				if(ms < 200.0) g_frameMs = g_frameMs * 0.9f + (float)ms * 0.1f;
 				if(ms < 1000.0) { s_sum += ms; ++s_cnt; if(ms > s_max) s_max = ms; if(ms > 33.4) ++s_o33; if(ms > 50.0) ++s_o50; }
 			}
@@ -2501,6 +2502,11 @@ namespace
 	// =====================================================================================================================
 	volatile LONG	g_envDead = 0;
 	volatile LONG	g_envQueued = 0;
+	volatile DWORD	g_envRetryAt = 0, g_envLastFail = 0;	// v0.26.0: os sensores religam-se sozinhos depois de um erro (nunca ficam desligados para sempre)
+	volatile LONG	g_envFailN = 0, g_envGroupNow = -1, g_envAirState = 0;
+	volatile float	g_envFallDist = 0.0f;
+	DWORD			g_exCode = 0; void * g_exAddr = NULL;
+	static int EnvFilter(DWORD code, EXCEPTION_POINTERS * ep) { g_exCode = code; g_exAddr = ep && ep->ExceptionRecord ? ep->ExceptionRecord->ExceptionAddress : NULL; return EXCEPTION_EXECUTE_HANDLER; }
 	int				g_envLogN = 0;
 
 	// v0.20.0: globais do SoftTargetEnv.esp (formularios 0x800..0x80B). Os nomes seguem os do RaySense para os pacotes convertidos.
@@ -2638,13 +2644,17 @@ namespace
 		if(r.layer == 30) t = (float)kFormType_NPC;
 		if(refOk && r.root)
 		{
-			TESObjectREFR * ref = ((_EnvFindRef)0x004726B0)(r.root);
-			if(ref && (ref->formType == kFormType_Reference || ref->formType == kFormType_Character) && ref->baseForm)
+			__try
 			{
-				const UInt8 bt = ref->baseForm->formType;
-				if(bt == kFormType_Static || bt == kFormType_Tree || bt == kFormType_Furniture || bt == kFormType_Door || bt == kFormType_Activator || bt == kFormType_MovableStatic || bt == kFormType_NPC)
-					t = (float)bt;
+				TESObjectREFR * ref = ((_EnvFindRef)0x004726B0)(r.root);
+				if(ref && (ref->formType == kFormType_Reference || ref->formType == kFormType_Character) && ref->baseForm)
+				{
+					const UInt8 bt = ref->baseForm->formType;
+					if(bt == kFormType_Static || bt == kFormType_Tree || bt == kFormType_Furniture || bt == kFormType_Door || bt == kFormType_Activator || bt == kFormType_MovableStatic || bt == kFormType_NPC)
+						t = (float)bt;
+				}
 			}
+			__except(EXCEPTION_EXECUTE_HANDLER) { }
 		}
 		return t;
 	}
@@ -2826,7 +2836,9 @@ namespace
 		g_envObsH = pub; g_envHeldType = tooClose ? 0.0f : g_es.obsType;
 		// v0.25.1: o TIPO do obstaculo a frente publica-se sempre (a Wall Leaning exige tipo estatico/porta/arvore junto a uma parede); so a altura fica a 0 quando esta perto demais
 		const float typeNear = (tooClose && nr >= 0) ? EnvClassify(fr[nr], refOk) : 0.0f;
-		EnvSet(0, tooClose ? typeNear : g_es.obsType); EnvSet(1, pub);
+		float pubType = tooClose ? typeNear : g_es.obsType;
+		if(pubType == 0.0f && g_es.wall[0] <= 60.0f && g_es.wtype[0] != 0.0f) pubType = g_es.wtype[0];
+		EnvSet(0, pubType); EnvSet(1, pub);
 		EnvApplyJumpBonus(pub);
 	}
 
@@ -2888,7 +2900,7 @@ namespace
 		bool on[13];
 		for(int i = 0; i < 13; ++i)
 		{
-			const float L = (float)(i - 6) * 8.0f;
+			const float L = (float)(i - 6) * 10.0f;
 			float hh = 0.0f;
 			const bool ok = EnvGroundH(player, cx + e.rx * L, cy + e.ry * L, e.pos.z, &hh, NULL);
 			on[i] = ok && fabsf(hh - h0) <= 25.0f;
@@ -2900,8 +2912,8 @@ namespace
 		while(lo > 0 && on[lo - 1]) --lo;
 		while(hi < 12 && on[hi + 1]) ++hi;
 		if(lo == 0 || hi == 12) return false;
-		*c = (float)((lo - 6) + (hi - 6)) * 4.0f;
-		*half = (float)(hi - lo) * 4.0f + 4.0f;
+		*c = (float)((lo - 6) + (hi - 6)) * 5.0f;
+		*half = (float)(hi - lo) * 5.0f + 5.0f;
 		return true;
 	}
 
@@ -2920,10 +2932,28 @@ namespace
 		static DWORD s_beamSince = 0, s_beamLost = 0;
 		const DWORD tn = GetTickCount();
 		float hl = 0.0f, hr = 0.0f;
-		const bool okl = EnvGroundH(player, e.pos.x - e.rx * 45.0f, e.pos.y - e.ry * 45.0f, e.pos.z, &hl, NULL);
-		const bool okr = EnvGroundH(player, e.pos.x + e.rx * 45.0f, e.pos.y + e.ry * 45.0f, e.pos.z, &hr, NULL);
-		const bool dropL = !okl || (h0 - hl) >= 50.0f, dropR = !okr || (h0 - hr) >= 50.0f;
-		const bool cand = g_es.ok0 && g_es.slope < 30.0f && g_es.vertPlayer < 15.0f && (dropL || dropR);
+		// v0.26.0: UMA VIGA tem queda dos DOIS lados (a 70 do centro), e uma faixa estreita (largura ate ~130) entre elas. Queda so de um lado = borda (Edge), nao viga.
+		// Se o eixo ainda nao e conhecido, testa 4 orientacoes (0, 45, 90, 135 graus em relacao ao corpo) e fica com a faixa mais estreita.
+		bool dropL = false, dropR = false, strip = false; float bestHalf = 1000.0f, bestYaw = 0.0f;
+		if(g_es.ok0 && g_es.slope < 30.0f && g_es.vertPlayer < 15.0f)
+		{
+			const float yaw0 = atan2f(e.fx, e.fy);
+			const bool known = g_beamOk && (DWORD)(tn - g_beamTick) < 1000;
+			const int nAng = known ? 1 : 4;
+			for(int ai = 0; ai < nAng; ++ai)
+			{
+				const float ya = known ? g_beamHead : yaw0 + (float)ai * 0.7853982f;
+				EnvPos f = e; f.fx = sinf(ya); f.fy = cosf(ya); f.rx = f.fy; f.ry = -f.fx;
+				const bool okl = EnvGroundH(player, e.pos.x - f.rx * 70.0f, e.pos.y - f.ry * 70.0f, e.pos.z, &hl, NULL);
+				const bool okr = EnvGroundH(player, e.pos.x + f.rx * 70.0f, e.pos.y + f.ry * 70.0f, e.pos.z, &hr, NULL);
+				const bool dl = !okl || (h0 - hl) >= 50.0f, dr = !okr || (h0 - hr) >= 50.0f;
+				if(!(dl && dr)) continue;
+				float sc = 0.0f, sw = 0.0f;
+				if(BeamCenterAt(player, f, 0.0f, h0, &sc, &sw) && sw <= 66.0f && sw < bestHalf) { bestHalf = sw; bestYaw = ya; strip = true; dropL = dl; dropR = dr; }
+			}
+		}
+		const bool cand = strip;
+		if(cand && !(g_beamOk && (DWORD)(tn - g_beamTick) < 1000)) { g_beamHead = bestYaw; g_beamTick = tn; g_beamOk = 1; g_beamLat = 0.0f; g_beamHalf = bestHalf; }
 		if(cand) { if(!s_beamSince) s_beamSince = tn; s_beamLost = 0; }
 		else { s_beamSince = 0; if(!s_beamLost) s_beamLost = tn; }
 		if(cand && (DWORD)(tn - s_beamSince) >= 200 && !g_envOnBeam) { g_envOnBeam = 1; _MESSAGE("env: BeamWalkOnBeam ON (drop left %s / right %s)", dropL ? "yes" : "no", dropR ? "yes" : "no"); }
@@ -2986,6 +3016,7 @@ namespace
 			if(drop > cliff) cliff = drop;
 		}
 		if(cliff > 1500.0f) cliff = 1500.0f;
+		if(g_envOnBeam) cliff = 0.0f;		// v0.26.0: em cima de uma viga nao ha "borda" (Edge) - evita as animacoes pisarem-se
 		EnvSet(34, cliff); g_dbgCliff = cliff;
 	}
 
@@ -2998,11 +3029,13 @@ namespace
 		{
 			const float dx = e.rx * kWA[i][0] + e.fx * kWA[i][1], dy = e.ry * kWA[i][0] + e.fy * kWA[i][1];
 			g_es.wall[i] = 999.0f; g_es.wtype[i] = 0.0f;
-			if(EnvCast(player, e.pos.x, e.pos.y, e.pos.z + 80.0f, dx, dy, 0.0f, 100.0f, 3, &r) && r.hit && fabsf(r.nz) < 0.5f)
+			if(EnvCast(player, e.pos.x, e.pos.y, e.pos.z + 80.0f, dx, dy, 0.0f, 100.0f, 3, &r) && r.hit && fabsf(r.nz) < 0.75f)
 			{ g_es.wall[i] = r.dist; g_es.wtype[i] = EnvClassify(r, refOk); }
 		}
 		EnvSet(6, g_es.wall[0]); EnvSet(kEnvWallFL, g_es.wall[1]); EnvSet(kEnvWallFR, g_es.wall[2]); EnvSet(7, g_es.wall[3]); EnvSet(8, g_es.wall[4]);
 		EnvSet(kEnvTypeL, g_es.wtype[3]); EnvSet(kEnvTypeR, g_es.wtype[4]);
+		// v0.26.0: junto a uma parede o tipo do obstaculo a frente vem da propria parede (a Wall Leaning exige estatico/porta/arvore)
+		if(g_es.wall[0] <= 60.0f && g_es.wtype[0] != 0.0f && g_envHeldType == 0.0f) EnvSet(0, g_es.wtype[0]);
 	}
 
 	// saliencia: raios para baixo a partir de 200 unidades acima dos pes, de 10 em 10 unidades para a frente (ate 75); so com obstaculo a frente
@@ -3039,6 +3072,7 @@ namespace
 	void EnvMeasure()
 	{
 		if(g_envDead || !g_cfg.envProbe || !g_gameLive) return;
+		if(g_frameLastMs > 150.0f) { g_frameLastMs = 16.0f; return; }		// v0.26.0: soluco / carregamento - salta este ciclo e retoma
 		PlayerCharacter * player = Engine::Player();
 		if(!player) return;
 		static bool s_zeroed = false, s_init = false;
@@ -3073,11 +3107,16 @@ namespace
 			static DWORD s_next[4]; static unsigned s_tick = 0;
 			static const DWORD kInt[3][4] = { { 200, 150, 300, 300 }, { 150, 100, 200, 200 }, { 100, 60, 100, 100 } };	// chao/viga, paredes, terreno a frente, saliencia (ms)
 			const DWORD now = GetTickCount();
-			const DWORD mul = g_envIdle ? 2 : 1;
+			// v0.26.0: a leitura acompanha o tempo de frame - com frames lentos (>33 ms) os grupos leem mais devagar (ate 4x), nunca param
+			const float fmx = g_frameMs;
+			const DWORD mulF = fmx > 33.0f ? (DWORD)(fmx / 33.0f > 4.0f ? 4.0f : fmx / 33.0f) : 1;
+			const DWORD mul = (g_envIdle ? 2 : 1) * (mulF < 1 ? 1 : mulF);
+			if(g_envAirState && (g_envNeed & (kNeedGround | kNeedBeam))) s_next[0] = now;		// no ar o chao le-se a cada ciclo (altura da queda)
 			const LONG need = g_envNeed;
 			++s_tick;
 			// rapido: so em movimento, ou de 4 em 4 ciclos parado
-			if((need & kNeedFwd) && (e.moving || (s_tick & 3) == 0)) EnvGroupFwd(player, e, s_refOk);
+			g_envGroupNow = 0;
+			if((need & kNeedFwd) && (e.moving || (s_tick & 3) == 0) && (mulF < 2 || (s_tick & 1) == 0)) EnvGroupFwd(player, e, s_refOk);
 			// lento: no maximo um grupo por ciclo, o mais atrasado
 			const DWORD * iv = kInt[g_cfg.envPerf];
 			const LONG want[4] = { (LONG)(need & (kNeedGround | kNeedBeam)), (LONG)(need & kNeedWall), (LONG)(need & kNeedFront), (LONG)(need & kNeedLedge) };
@@ -3091,10 +3130,26 @@ namespace
 			if(pick >= 0)
 			{
 				s_next[pick] = now + iv[pick] * mul;
+				g_envGroupNow = 1 + pick;
 				if(pick == 0) EnvGroupGround(player, e);
 				else if(pick == 1) EnvGroupWalls(player, e, s_refOk);
 				else if(pick == 2) EnvGroupFront(player, e);
 				else EnvGroupLedge(player, e);
+			}
+			g_envGroupNow = 5;
+			{
+				// v0.26.0: distancia de queda real (altura maxima desde que saiu do chao - altura atual). O FreeRun/FreeClimb levantam o personagem, por isso
+				// o raio ao chao sozinho nao serve: Verticality_Player = o maior dos dois.
+				static float s_zPeak = 0.0f; static bool s_airPrev = false;
+				const bool air = g_envAirState != 0;
+				if(!air) { s_zPeak = e.pos.z; if(s_airPrev && (need & kNeedGround)) EnvGroupGround(player, e); g_envFallDist = 0.0f; }
+				else
+				{
+					if(!s_airPrev || e.pos.z > s_zPeak) s_zPeak = e.pos.z;
+					const float fd = s_zPeak - e.pos.z; g_envFallDist = fd;
+					if((need & kNeedGround) && fd > g_es.vertPlayer) { g_es.vertPlayer = fd; EnvSet(3, fd); }
+				}
+				s_airPrev = air;
 			}
 			g_envIdle = (!e.moving && g_es.heldH <= 0.0f) ? 1 : 0;
 			// log so quando algo mudou de forma apreciavel
@@ -3112,10 +3167,16 @@ namespace
 						 g_es.ledgeH, g_es.ledgeD, (int)g_envOnBeam, (float)g_dbgCliff, (float)g_dbgDepth, g_es.fd[0], g_es.fd[1], g_es.fd[2], (unsigned)g_es.fl[0], (unsigned)g_es.fl[1], (unsigned)g_es.fl[2]);
 			}
 		}
-		__except(EXCEPTION_EXECUTE_HANDLER)
+		__except(EnvFilter(GetExceptionCode(), GetExceptionInformation()))
 		{
+			const DWORD tf = GetTickCount();
+			if((DWORD)(tf - g_envLastFail) > 120000) g_envFailN = 0;
+			g_envLastFail = tf;
+			const LONG n = InterlockedIncrement(&g_envFailN);
+			const DWORD wait = 3000u << (n > 4 ? 4 : (n - 1));
+			g_envRetryAt = tf + (wait > 60000 ? 60000 : wait);
 			InterlockedExchange(&g_envDead, 1);
-			_MESSAGE("env: exception during the sensors - they are now off");
+			_MESSAGE("env: exception 0x%08X at %p in sensor group %d (failure %d) - the sensors pause and restart by themselves in %u s", (unsigned)g_exCode, g_exAddr, (int)g_envGroupNow, (int)n, (unsigned)((wait > 60000 ? 60000 : wait) / 1000));
 		}
 		// medicao de tempo: media e maximo (ms) a cada 10 s, ate 40 linhas
 		QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&qf);
@@ -3149,6 +3210,12 @@ namespace
 			Sleep(kTick[g_cfg.envPerf]);
 			PerfLog();
 			if(!scanned && g_gameLive) { scanned = true; EnvScanDemand(); }
+			if(g_gameLive) FrameQueue();
+			if(g_envDead && g_envRetryAt && (LONG)(GetTickCount() - g_envRetryAt) >= 0 && g_gameLive)
+			{
+				g_envRetryAt = 0; InterlockedExchange(&g_envDead, 0);
+				_MESSAGE("env: the sensors restarted (attempt %d)", (int)g_envFailN);
+			}
 			if(g_envDead || !g_cfg.envProbe || !g_gameLive || !g_taskIface) continue;
 			if(InterlockedExchange(&g_envQueued, 1) == 0) g_taskIface->AddTask(new EnvTask());
 		}
@@ -3210,6 +3277,7 @@ namespace
 			}
 			__except(EXCEPTION_EXECUTE_HANDLER) { st = -1; }
 			if(st < 0 || st > 8) { prev = 0; if(latched) { latched = false; EnvSet(kEnvJump, 0.0f); } continue; }
+			g_envAirState = st;
 			const DWORD now = GetTickCount();
 			{
 				static int s_jl = 0;
@@ -4675,7 +4743,7 @@ namespace
 			float dt = (now - last) / 1000.0f;
 			last = now;
 			if(dt > 0.1f) dt = 0.1f;
-			if((g_cfg.frameLog || g_cfg.lockLatencyComp) && g_gameLive) FrameQueue();
+			if(g_gameLive) FrameQueue();
 
 			// v0.16.2: mod desligado no MCM, jogo ainda a carregar ou menu aberto: nao se mexe em nada.
 			if(!g_cfg.enabled || !g_gameLive || (now - g_liveTick) < 1500)
