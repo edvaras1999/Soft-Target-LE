@@ -184,6 +184,7 @@ namespace
 		int		lockArrowTilt;		// v0.25.0: 1 = com o lock e um arco, a flecha sai mais reta (INI f1P/f3PArrowTiltUpAngle), reposto ao largar
 		int		beamRail;			// v0.25.0: 1 = em cima da viga o movimento lateral e removido (trilho) e o jogador e puxado ao centro
 		int		frameLog;			// v0.25.0: 1 = regista o tempo de frame no log (para comparar com os sensores ligados/desligados)
+		int		lockLatencyComp;	// v0.25.1: 1 = a mira do lock adianta-se pela velocidade do alvo x ~1,5 frames (compensa o atraso de leitura da camera)
 		int		singleWriter;		// v0.25.0: 1 = as escritas da camera do lock fazem-se uma vez por frame, na thread do jogo
 		// ---- v0.19.0
 		int		envProbe;			// 1 = sensores do ambiente (chao, inclinacao, obstaculos a frente, saliencia): log + globais do SoftTargetEnv.esp
@@ -336,19 +337,20 @@ namespace
 		{ "LockArrowTilt",			'i', &g_cfg.lockArrowTilt,		1.0f },
 		{ "BeamRail",				'i', &g_cfg.beamRail,			1.0f },
 		{ "FrameTimeLog",			'i', &g_cfg.frameLog,			1.0f },
+		{ "LockLatencyComp",		'i', &g_cfg.lockLatencyComp,	1.0f },
 		{ "SingleRotationWriter",	'i', &g_cfg.singleWriter,		0.0f },
 		{ "EnvProbe",				'i', &g_cfg.envProbe,			1.0f },
 		{ "EnvJumpObstacle",		'i', &g_cfg.envJump,			1.0f },
 		{ "EnvInCombat",			'i', &g_cfg.envInCombat,		0.0f },
-		{ "JumpObstacleMin",		'f', &g_cfg.jumpObstacleMin,	66.0f },
+		{ "JumpObstacleMin",		'f', &g_cfg.jumpObstacleMin,	44.0f },
 		{ "EnvWalkDistance",		'f', &g_cfg.envWalkDist,		230.0f },
-		{ "EnvPerformance",			'i', &g_cfg.envPerf,			0.0f },
+		{ "EnvPerformance",			'i', &g_cfg.envPerf,			2.0f },
 		{ "EnvDemandScan",			'i', &g_cfg.envDemand,			1.0f },
 		{ "EnvHoldMs",				'f', &g_cfg.envHoldMs,			300.0f },
-		{ "ObstacleJumpMinDistance",'f', &g_cfg.obsMinDist,			70.0f },
+		{ "ObstacleJumpMinDistance",'f', &g_cfg.obsMinDist,			120.0f },
 		{ "ObstacleJumpBonus",		'i', &g_cfg.jumpBonus,			1.0f },
-		{ "ObstacleJumpClearance",	'f', &g_cfg.jumpClearance,		25.0f },
-		{ "ObstacleJumpMaxMult",	'f', &g_cfg.jumpMaxMult,		2.5f },
+		{ "ObstacleJumpClearance",	'f', &g_cfg.jumpClearance,		40.0f },
+		{ "ObstacleJumpMaxMult",	'f', &g_cfg.jumpMaxMult,		3.3f },
 		{ "KeytraceCombatOnly",		'i', &g_cfg.keytraceCombatOnly,	1.0f },
 		{ "EnvSprintDistance",		'f', &g_cfg.envSprintDist,		330.0f },
 		{ "LockIgnoreEssential",	'i', &g_cfg.lockIgnoreEssential,1.0f },
@@ -1291,6 +1293,8 @@ namespace
 	struct DeferSlot { float * a; float v; };
 	DeferSlot		g_defer[16];
 	int				g_deferN = 0;
+	volatile float	g_frameMs = 20.0f;			// v0.25.1: tempo de frame medio (EMA)
+	volatile float	g_railLat = 0.0f, g_railHead = 0.0f;
 	volatile LONG	g_railOn = 0;				// v0.25.0: trilho da viga ativo
 	volatile DWORD	g_railTick = 0;
 	volatile LONG	g_envNeedMirror = 0;		// espelho de g_envNeed so para o log do frame
@@ -1329,7 +1333,7 @@ namespace
 		InterlockedExchange(&g_deferLock, 0);
 		__try { for(int i = 0; i < n; ++i) *loc[i].a = loc[i].v; }
 		__except(EXCEPTION_EXECUTE_HANDLER) { }
-		if(g_cfg.frameLog)
+		if(g_cfg.frameLog || g_cfg.lockLatencyComp)
 		{
 			static LARGE_INTEGER s_last = {0}, s_freq = {0};
 			static double s_sum = 0.0, s_max = 0.0; static int s_cnt = 0, s_o33 = 0, s_o50 = 0, s_lines = 0; static DWORD s_t0 = 0;
@@ -1338,6 +1342,7 @@ namespace
 			if(s_last.QuadPart && s_freq.QuadPart)
 			{
 				const double ms = (double)(t.QuadPart - s_last.QuadPart) * 1000.0 / (double)s_freq.QuadPart;
+				if(ms < 200.0) g_frameMs = g_frameMs * 0.9f + (float)ms * 0.1f;
 				if(ms < 1000.0) { s_sum += ms; ++s_cnt; if(ms > s_max) s_max = ms; if(ms > 33.4) ++s_o33; if(ms > 50.0) ++s_o50; }
 			}
 			s_last = t;
@@ -1345,7 +1350,7 @@ namespace
 			if(!s_t0) s_t0 = now;
 			if((DWORD)(now - s_t0) >= 10000)
 			{
-				if(s_cnt > 0 && s_lines < 200)
+				if(g_cfg.frameLog && s_cnt > 0 && s_lines < 200)
 				{
 					++s_lines;
 					_MESSAGE("frametime: 10 s: avg %.1f ms (%.0f fps), worst %.0f ms, frames over 33 ms: %d, over 50 ms: %d | sensors mask 0x%X, lock %d, beam rail %d",
@@ -2819,7 +2824,9 @@ namespace
 		if(h >= g_es.heldH || (DWORD)(now - g_es.heldTick) > (DWORD)g_cfg.envHoldMs) { g_es.heldH = h; g_es.heldTick = now; g_es.obsType = type; }
 		const float pub = tooClose ? 0.0f : g_es.heldH;
 		g_envObsH = pub; g_envHeldType = tooClose ? 0.0f : g_es.obsType;
-		EnvSet(0, tooClose ? 0.0f : g_es.obsType); EnvSet(1, pub);
+		// v0.25.1: o TIPO do obstaculo a frente publica-se sempre (a Wall Leaning exige tipo estatico/porta/arvore junto a uma parede); so a altura fica a 0 quando esta perto demais
+		const float typeNear = (tooClose && nr >= 0) ? EnvClassify(fr[nr], refOk) : 0.0f;
+		EnvSet(0, tooClose ? typeNear : g_es.obsType); EnvSet(1, pub);
 		EnvApplyJumpBonus(pub);
 	}
 
@@ -2849,14 +2856,14 @@ namespace
 			const float ix = g_mvLS[0] ? v0[1] : v0[0], iy = g_mvLS[0] ? v0[0] : v0[1];
 			const float len = sqrtf(ix * ix + iy * iy);
 			if(!(len == len) || len < 0.2f || len > 1.6f) return;
-			const float a = WrapPi(g_beamHead - ref);
+			const float a = WrapPi(g_railHead - ref);
 			const float sa = sinf(a), ca = cosf(a);
 			const float along = ix * sa + iy * ca;
-			const float lat = g_beamLat;
-			const float dz = 6.0f;
-			float corr = fabsf(lat) <= dz ? 0.0f : (lat - (lat > 0.0f ? dz : -dz)) / 24.0f;
+			const float lat = g_railLat;
+			const float dz = 3.0f;
+			float corr = fabsf(lat) <= dz ? 0.0f : (lat - (lat > 0.0f ? dz : -dz)) / 16.0f;
 			if(corr > 1.0f) corr = 1.0f; if(corr < -1.0f) corr = -1.0f;
-			corr *= 0.6f * (len > 1.0f ? 1.0f : len);
+			corr *= 0.8f * (len > 1.0f ? 1.0f : len);
 			float nx = along * sa + corr * ca, ny = along * ca - corr * sa;
 			const float nl2 = sqrtf(nx * nx + ny * ny);
 			if(nl2 > 1.0f) { nx /= nl2; ny /= nl2; }
@@ -2968,7 +2975,14 @@ namespace
 			EnvRay r;
 			float drop = 0.0f;
 			if(EnvCast(player, e.pos.x + e.fx * dd, e.pos.y + e.fy * dd, e.pos.z + 120.0f, 0, 0, -1.0f, 1600.0f, 3, &r) && r.hit) drop = g_es.h0 - (120.0f - r.dist);
-			else drop = 1500.0f;
+			else
+			{
+				// v0.25.1: falha do raio = queda so se o caminho ate la estiver livre (junto a uma parede o raio nasce dentro da geometria e falhava: falso precipicio)
+				EnvRay hr;
+				const bool blockedLow = EnvCast(player, e.pos.x, e.pos.y, e.pos.z + 40.0f, e.fx, e.fy, 0.0f, dd + 40.0f, 3, &hr) && hr.hit;
+				const bool blockedHigh = EnvCast(player, e.pos.x, e.pos.y, e.pos.z + 110.0f, e.fx, e.fy, 0.0f, dd + 40.0f, 3, &hr) && hr.hit;
+				drop = (blockedLow || blockedHigh || g_es.wall[0] < dd + 60.0f) ? 0.0f : 1500.0f;
+			}
 			if(drop > cliff) cliff = drop;
 		}
 		if(cliff > 1500.0f) cliff = 1500.0f;
@@ -3669,6 +3683,12 @@ namespace
 
 		// 4) ponto de mira e previsao do disparo
 		float ax = pos.x + g_lockOff[0], ay = pos.y + g_lockOff[1], az = pos.z + g_lockOff[2];
+		if(g_cfg.lockLatencyComp)
+		{
+			// v0.25.1: a camera e lida com cerca de um frame de atraso; adianta-se o ponto pela velocidade do alvo x 1,5 frames (max 120 ms)
+			float lat = g_frameMs * 1.5f * 0.001f; if(lat > 0.12f) lat = 0.12f; if(lat < 0.0f) lat = 0.0f;
+			ax += g_lockVel[0] * lat; ay += g_lockVel[1] * lat; az += g_lockVel[2] * lat * 0.5f;
+		}
 
 		if(RangedHeld(player)) g_assistUntil = now + 350;		// o disparo sai ao SOLTAR: mantem a ajuda um instante
 		// v0.16.7: com o arco equipado a previsao ja esta ativa antes de puxar; o ponto de mira nao salta ao comecar a puxar.
@@ -4554,9 +4574,30 @@ namespace
 		}
 		const bool movingNow = g_moveHeld || (DWORD)(now - s_mvT) < 300;
 		{
-			const bool railOk = g_cfg.beamRail && g_envOnBeam && g_beamOk && (DWORD)(now - g_beamTick) < 1000 && g_es.ok0 && g_es.vertPlayer < 15.0f && !IsMountedCam();
-			if(railOk) { g_railTick = now; if(!g_railOn) _MESSAGE("beam rail: ON"); g_railOn = 1; }
-			else { if(g_railOn) _MESSAGE("beam rail: OFF"); g_railOn = 0; }
+			// v0.25.1: o trilho guarda a LINHA da viga (centro + direcao) quando a deteta e mede o desvio pela posicao do jogador a cada ciclo.
+			// Fica ligado ate saltares / caires (sem chao ~120 ms) ou te afastares da linha mais de 45 unidades.
+			static bool s_rl = false; static float s_cx = 0.0f, s_cy = 0.0f, s_ch = 0.0f; static DWORD s_airSince = 0, s_lastFresh = 0, s_lastAir = 0;
+			const NiPoint3 rp = Engine::Position(player);
+			const bool grounded = g_es.ok0 && g_es.vertPlayer < 15.0f;
+			if(!grounded) { if(!s_airSince) s_airSince = now; s_lastAir = now; } else s_airSince = 0;
+			const bool fresh = g_cfg.beamRail && g_envOnBeam && g_beamOk && (DWORD)(now - g_beamTick) < 1000 && g_es.ok0 && !IsMountedCam();
+			if(fresh && grounded && g_beamTick != s_lastFresh && (s_rl || (DWORD)(now - s_lastAir) > 400))
+			{
+				s_lastFresh = g_beamTick;
+				const float hh = g_beamHead, ll = g_beamLat;
+				const float ncx = rp.x + cosf(hh) * ll, ncy = rp.y - sinf(hh) * ll;
+				if(!s_rl) { s_rl = true; s_cx = ncx; s_cy = ncy; s_ch = hh; _MESSAGE("beam rail: ON (line axis %.0f deg, offset %.0f)", hh * 57.2958f, ll); }
+				else if(fabsf(ll) < 20.0f) { s_cx = ncx; s_cy = ncy; s_ch = hh; }
+			}
+			if(s_rl)
+			{
+				const float lat = (s_cx - rp.x) * cosf(s_ch) + (s_cy - rp.y) * (-sinf(s_ch));
+				if(!g_cfg.beamRail || IsMountedCam()) { s_rl = false; _MESSAGE("beam rail: OFF (disabled)"); }
+				else if(s_airSince && (DWORD)(now - s_airSince) > 120) { s_rl = false; _MESSAGE("beam rail: OFF (left the ground)"); }
+				else if(fabsf(lat) > 45.0f) { s_rl = false; _MESSAGE("beam rail: OFF (%.0f units from the line)", lat); }
+				else { g_railLat = lat; g_railHead = s_ch; g_railTick = now; g_railOn = 1; }
+			}
+			if(!s_rl) g_railOn = 0;
 		}
 		const bool ok = g_cfg.beamAssist && g_envOnBeam && g_beamOk && (DWORD)(now - g_beamTick) < 1000 && movingNow && !g_lockOwn && !g_active && !IsMountedCam();
 		if(!ok)
@@ -4634,7 +4675,7 @@ namespace
 			float dt = (now - last) / 1000.0f;
 			last = now;
 			if(dt > 0.1f) dt = 0.1f;
-			if(g_cfg.frameLog && g_gameLive) FrameQueue();
+			if((g_cfg.frameLog || g_cfg.lockLatencyComp) && g_gameLive) FrameQueue();
 
 			// v0.16.2: mod desligado no MCM, jogo ainda a carregar ou menu aberto: nao se mexe em nada.
 			if(!g_cfg.enabled || !g_gameLive || (now - g_liveTick) < 1500)
