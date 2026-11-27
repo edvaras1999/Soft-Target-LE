@@ -36,7 +36,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.26.3 (viga: trilho estavel + velocidade + salto alinhado; borda ignora paredes; Keytrace com SoftTarget; arco sem lock de camera)"
+#define PLUGIN_VERSION_STR	"0.26.4 (viga: camera livre, linha suave, entrada garantida; EdgeGuard progressivo com libertacao)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -184,6 +184,7 @@ namespace
 		int		lockArrowTilt;		// v0.25.0: 1 = com o lock e um arco, a flecha sai mais reta (INI f1P/f3PArrowTiltUpAngle), reposto ao largar
 		int		beamRail;			// v0.25.0: 1 = em cima da viga o movimento lateral e removido (trilho) e o jogador e puxado ao centro
 		int		beamEnd;			// v0.26.2: 1 = no fim da viga o movimento abranda e para (soltar e premir outra vez deixa-te cair)
+		int		beamCamSteer;		// v0.26.4: 1 = o assist da viga roda a camera/corpo (antigo); 0 = camera livre, so o movimento e preso (default)
 		float	beamSpeed;			// v0.26.3: fator da velocidade ao longo da viga (0.3-1.0)
 		int		beamJumpAlign;		// v0.26.3: 1 = ao saltar para uma viga estreita a frente o corpo alinha-se com o eixo
 		int		edgeDropMin;		// v0.26.3: queda minima (unidades) para a zona de borda/EdgeGuard
@@ -344,7 +345,8 @@ namespace
 		{ "LockArrowTilt",			'i', &g_cfg.lockArrowTilt,		1.0f },
 		{ "BeamRail",				'i', &g_cfg.beamRail,			1.0f },
 		{ "BeamEndSlow",			'i', &g_cfg.beamEnd,			1.0f },
-		{ "BeamSpeed",				'f', &g_cfg.beamSpeed,		0.6f },
+		{ "BeamCamSteer",			'i', &g_cfg.beamCamSteer,		0.0f },
+		{ "BeamSpeed",				'f', &g_cfg.beamSpeed,		0.85f },
 		{ "BeamJumpAlign",			'i', &g_cfg.beamJumpAlign,	1.0f },
 		{ "EdgeDropMin",			'i', &g_cfg.edgeDropMin,		60.0f },
 		{ "EdgeZone",				'i', &g_cfg.edgeZone,			1.0f },
@@ -1316,6 +1318,10 @@ namespace
 	volatile float	g_guardBase = 0.0f;
 	volatile DWORD	g_guardTick = 0;
 	volatile float	g_guardDist[8] = { 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f };	// v0.26.2: distancia a queda em cada direcao (15/30/R)
+	volatile float	g_aheadCx = 0.0f, g_aheadCy = 0.0f, g_aheadHalf = 30.0f;	// v0.26.4: linha da viga vista a frente (centro, meia-largura)
+	volatile float	g_preCx = 0.0f, g_preCy = 0.0f, g_preHead = 0.0f, g_preHalf = 30.0f;	// linha guardada no salto (engate imediato ao aterrar)
+	volatile LONG	g_prePending = 0;
+	volatile DWORD	g_preUntil = 0, g_guardRel = 0;
 	volatile float	g_aheadYaw = 0.0f, g_alignYaw = 0.0f;	// v0.26.3: eixo da viga a frente / rumo a que o corpo se alinha no salto
 	volatile DWORD	g_aheadTick = 0, g_alignUntil = 0;
 	volatile float	g_endF[2] = { 1.0f, 1.0f };	// v0.26.2: fator de velocidade no fim da viga (sentido do eixo / contrario)
@@ -2894,9 +2900,7 @@ namespace
 			const float * v0 = (const float *)(b0 + g_mvLW[0]);
 			const float ix = g_mvLS[0] ? v0[1] : v0[0], iy = g_mvLS[0] ? v0[0] : v0[1];
 			const float len = sqrtf(ix * ix + iy * iy);
-			static DWORD s_relT = 0, s_allowUntil = 0; static bool s_stopped = false;
-			if(!(len == len) || len < 0.2f) { if(s_stopped) { s_allowUntil = GetTickCount() + 1500; s_stopped = false; } return; }
-			if(len > 1.6f) return;
+			if(!(len == len) || len < 0.2f || len > 1.6f) return;
 			const float a = WrapPi(g_railHead - ref);
 			const float sa = sinf(a), ca = cosf(a);
 			float along = ix * sa + iy * ca;
@@ -2904,22 +2908,22 @@ namespace
 				// v0.26.2: CONVERTE em vez de remover - o input que vai de lado vira movimento ao longo da viga (no sentido da tua intencao),
 				// com pelo menos 60% da velocidade. Antes um eixo perpendicular ao input anulava o movimento e ficavas parado.
 				const float sg = along >= 0.0f ? 1.0f : -1.0f; float aa = fabsf(along); const float mn = 0.6f * len; if(aa < mn) aa = mn;
-				along = sg * aa * g_cfg.beamSpeed;	// v0.26.3: BeamSpeed reduz a velocidade ao longo da viga
+				along = sg * aa * (g_shiftHeld ? 1.0f : g_cfg.beamSpeed);	// v0.26.4: BeamSpeed; com Shift (correr) sem reducao
 				// fim da viga: abranda (70 -> 60%, 50 -> 35%) e para (30 -> 0); soltar e premir de novo liberta 1,5 s
 				if(g_cfg.beamEnd)
 				{
 					const float ef = g_endF[along >= 0.0f ? 0 : 1];
-					if(ef < 0.999f && (int)(GetTickCount() - s_allowUntil) >= 0)
-					{
-						along *= ef; if(ef <= 0.0f) s_stopped = true;
-					}
+					if(ef < 0.999f) along *= ef;		// v0.26.4: no fim da viga so se sai saltando
 				}
 			}
 			const float lat = g_railLat;
-			const float dz = 1.5f;
-			float corr = fabsf(lat) <= dz ? 0.0f : (lat - (lat > 0.0f ? dz : -dz)) / 10.0f;
-			if(corr > 1.0f) corr = 1.0f; if(corr < -1.0f) corr = -1.0f;
-			corr *= 1.0f * (len > 1.0f ? 1.0f : len);
+			// v0.26.4: zona morta e puxao adaptam-se a largura da superficie; puxao limitado a 0.35 e nulo quando parado (fim da viga)
+			float hw = g_beamHalf; if(hw < 10.0f) hw = 10.0f; if(hw > 60.0f) hw = 60.0f;
+			const float dz = 1.5f + 0.1f * hw;
+			float corr = fabsf(lat) <= dz ? 0.0f : (lat - (lat > 0.0f ? dz : -dz)) / (6.0f + 0.5f * hw);
+			if(corr > 0.35f) corr = 0.35f; if(corr < -0.35f) corr = -0.35f;
+			corr *= (len > 1.0f ? 1.0f : len);
+			{ const float aA = fabsf(along) / 0.4f; if(aA < 1.0f) corr *= aA; }
 			float nx = along * sa + corr * ca, ny = along * ca - corr * sa;
 			const float nl2 = sqrtf(nx * nx + ny * ny);
 			if(nl2 > 1.0f) { nx /= nl2; ny /= nl2; }
@@ -2938,25 +2942,28 @@ namespace
 		}
 		__except(EXCEPTION_EXECUTE_HANDLER) { }
 	}
-	// v0.26.2: EdgeGuard gradual - a parte do movimento que vai em direcao a uma queda e atenuada conforme a distancia (50 -> 12 unidades:
-	// 100% -> 0%); o movimento ao longo da borda fica intacto (deslizas). O fator suaviza-se (EMA ~120 ms) para nao tremer.
+	// v0.26.4: EdgeGuard progressivo. A parte do movimento em direcao a queda e atenuada conforme a distancia (35 -> 12: 100% -> 0%); o movimento ao
+	// longo da borda fica intacto. Parado na borda (<15% durante o impulso): se continuas a empurrar 1,5 s, o efeito solta-se 2 s; saltar solta logo.
 	void MvGuard(float camYaw, float bodyYaw)
 	{
 		if(!g_mvFound || g_mvLN < 1) return;
-		static int s_logs = 0; static DWORD s_lt = 0, s_tt = 0; static float s_f[8] = { 1, 1, 1, 1, 1, 1, 1, 1 };
+		static int s_logs = 0; static DWORD s_lt = 0, s_tt = 0, s_push = 0, s_relUntil = 0; static float s_f[8] = { 1, 1, 1, 1, 1, 1, 1, 1 };
 		UInt8 * cs = ThirdPersonStatePtr();
 		const bool camRel = (g_mvWant != 0) ? false : (cs && !*(cs + 0xB4));
 		const float ref = camRel ? camYaw : bodyYaw;
 		__try
 		{
+			const DWORD now = GetTickCount();
+			if((LONG)(g_guardRel - now) > 0) { s_relUntil = g_guardRel; s_push = 0; }
+			if((LONG)(s_relUntil - now) > 0) return;
 			int n = 0;
 			UInt32 * b0 = MvBase(g_mvLR[0], &n);
 			if(!b0 || g_mvLW[0] + 1 >= n) return;
 			const float * v0 = (const float *)(b0 + g_mvLW[0]);
 			const float ix = g_mvLS[0] ? v0[1] : v0[0], iy = g_mvLS[0] ? v0[0] : v0[1];
 			const float len = sqrtf(ix * ix + iy * iy);
-			if(!(len == len) || len < 0.2f || len > 1.6f) return;
-			const DWORD now = GetTickCount();
+			if(!(len == len) || len < 0.2f) { s_push = 0; return; }
+			if(len > 1.6f) return;
 			const DWORD dtm = s_tt ? (DWORD)(now - s_tt) : 1000; s_tt = now;
 			const float al = dtm > 300 ? 1.0f : 1.0f - expf(-(float)dtm / 120.0f);
 			float nx = ix, ny = iy; bool ch = false; float minf = 1.0f;
@@ -2964,7 +2971,7 @@ namespace
 			for(int k = 0; k < 8; ++k)
 			{
 				float tf = 1.0f;
-				if(m & (1u << k)) { tf = (g_guardDist[k] - 12.0f) / 38.0f; if(tf < 0.0f) tf = 0.0f; if(tf > 1.0f) tf = 1.0f; }
+				if(m & (1u << k)) { tf = (g_guardDist[k] - 12.0f) / 23.0f; if(tf < 0.0f) tf = 0.0f; if(tf > 1.0f) tf = 1.0f; }
 				s_f[k] += (tf - s_f[k]) * al;
 				if(s_f[k] >= 0.98f) continue;
 				const float a = WrapPi(g_guardBase + (float)k * 0.7853982f - ref);
@@ -2972,7 +2979,13 @@ namespace
 				const float toward = nx * sa + ny * ca;
 				if(toward > 0.05f) { const float rm = toward * (1.0f - s_f[k]); nx -= rm * sa; ny -= rm * ca; ch = true; if(s_f[k] < minf) minf = s_f[k]; }
 			}
-			if(!ch) return;
+			if(!ch) { s_push = 0; return; }
+			if(minf < 0.15f)
+			{
+				if(!s_push) s_push = now;
+				else if((DWORD)(now - s_push) >= 1500) { s_relUntil = now + 2000; s_push = 0; _MESSAGE("edge guard: released for 2 s (you kept pushing)"); return; }
+			}
+			else s_push = 0;
 			if(s_logs < 40 && (DWORD)(now - s_lt) >= 1000) { s_lt = now; ++s_logs; _MESSAGE("edge guard: movement towards the drop reduced to %.0f%% (mask %02X)", minf * 100.0f, m); }
 			for(int k = 0; k < g_mvLN; ++k)
 			{
@@ -2994,7 +3007,7 @@ namespace
 			const float L = (float)(i - 6) * 10.0f;
 			float hh = 0.0f;
 			const bool ok = EnvGroundH(player, cx + e.rx * L, cy + e.ry * L, e.pos.z, &hh, NULL);
-			on[i] = ok && fabsf(hh - h0) <= 25.0f;
+			on[i] = ok && fabsf(hh - h0) <= 32.0f;
 		}
 		int ci = -1;
 		for(int k = 0; k <= 6 && ci < 0; ++k) { if(on[6 + k]) ci = 6 + k; else if(on[6 - k]) ci = 6 - k; }
@@ -3030,7 +3043,7 @@ namespace
 			bool ez = false; unsigned gm = 0; float gd[8];
 			for(int k = 0; k < 8; ++k) gd[k] = 999.0f;
 			const float yawb = atan2f(e.fx, e.fy);
-			if(g_cfg.edgeZone && g_es.ok0 && g_es.slope < 30.0f && g_es.vertPlayer < 15.0f && !g_envAirState)
+			if(g_cfg.edgeZone && g_es.ok0 && g_es.vertPlayer < 15.0f && !g_envAirState)
 			{
 				const float R = g_envEdgeZone ? 50.0f : 35.0f;
 				for(int k = 0; k < 8; ++k)
@@ -3045,12 +3058,14 @@ namespace
 					bool ok = EnvGroundH(player, e.pos.x + sx * R, e.pos.y + sy * R, e.pos.z, &hp, NULL);
 					if(!(!ok || (h0 - hp) >= (float)g_cfg.edgeDropMin)) continue;
 					float dist = R;
-					ok = EnvGroundH(player, e.pos.x + sx * 30.0f, e.pos.y + sy * 30.0f, e.pos.z, &hp, NULL);
-					if(!ok || (h0 - hp) >= (float)g_cfg.edgeDropMin)
 					{
-						dist = 30.0f;
-						ok = EnvGroundH(player, e.pos.x + sx * 15.0f, e.pos.y + sy * 15.0f, e.pos.z, &hp, NULL);
-						if(!ok || (h0 - hp) >= (float)g_cfg.edgeDropMin) dist = 15.0f;
+						static const float kD[4] = { 40.0f, 30.0f, 22.0f, 15.0f };
+						for(int di = 0; di < 4; ++di)
+						{
+							if(kD[di] >= R) continue;
+							ok = EnvGroundH(player, e.pos.x + sx * kD[di], e.pos.y + sy * kD[di], e.pos.z, &hp, NULL);
+							if(!ok || (h0 - hp) >= (float)g_cfg.edgeDropMin) dist = kD[di]; else break;
+						}
 					}
 					gd[k] = dist; gm |= 1u << k; ez = true;
 				}
@@ -3069,7 +3084,7 @@ namespace
 		// v0.26.0: UMA VIGA tem queda dos DOIS lados (a 70 do centro), e uma faixa estreita (largura ate ~130) entre elas. Queda so de um lado = borda (Edge), nao viga.
 		// Se o eixo ainda nao e conhecido, testa 4 orientacoes (0, 45, 90, 135 graus em relacao ao corpo) e fica com a faixa mais estreita.
 		bool dropL = false, dropR = false, strip = false; float bestHalf = 1000.0f, bestYaw = 0.0f;
-		if(g_es.ok0 && g_es.slope < 30.0f && g_es.vertPlayer < 15.0f)
+		if(g_es.ok0 && g_es.slope < 45.0f && g_es.vertPlayer < 15.0f)
 		{
 			const float yaw0 = atan2f(e.fx, e.fy);
 			const bool known = g_beamOk && (DWORD)(tn - g_beamTick) < 1000;
@@ -3120,19 +3135,22 @@ namespace
 			}
 		}
 		if(!g_envOnBeam) g_beamOk = 0;
-		// v0.26.3: SALTO GUIADO - procura uma viga estreita ~90 unidades a frente (8 orientacoes) enquanto andas em chao firme; o salto alinha o corpo com ela
-		if(g_cfg.beamJumpAlign && !g_envOnBeam && e.moving && !g_envAirState && g_es.ok0 && g_es.slope < 30.0f)
+		// v0.26.4: SALTO GUIADO - enquanto andas em chao firme procura uma viga ~80 e ~120 unidades a frente (8 orientacoes); guarda a linha dela
+		if(g_cfg.beamJumpAlign && !g_envOnBeam && e.moving && !g_envAirState && g_es.ok0 && g_es.slope < 45.0f)
 		{
 			static DWORD s_laT = 0;
 			if((DWORD)(tn - s_laT) >= 150)
 			{
 				s_laT = tn;
-				EnvPos fp = e; fp.pos.x = e.pos.x + e.fx * 90.0f; fp.pos.y = e.pos.y + e.fy * 90.0f;
-				float hP = 0.0f;
-				if(EnvGroundH(player, fp.pos.x, fp.pos.y, e.pos.z, &hP, NULL) && hP > -60.0f && hP < 100.0f)
+				const float yaw0 = atan2f(e.fx, e.fy);
+				bool found = false;
+				for(int di = 0; di < 2 && !found; ++di)
 				{
-					const float yaw0 = atan2f(e.fx, e.fy);
-					float bestHalf = 1000.0f, bestYaw = 0.0f; bool found = false;
+					const float dA = di ? 120.0f : 80.0f;
+					EnvPos fp = e; fp.pos.x = e.pos.x + e.fx * dA; fp.pos.y = e.pos.y + e.fy * dA;
+					float hP = 0.0f;
+					if(!EnvGroundH(player, fp.pos.x, fp.pos.y, e.pos.z, &hP, NULL) || hP < -60.0f || hP > 100.0f) continue;
+					float bestHalf = 1000.0f, bestYaw = 0.0f, bestC = 0.0f, bestRx = 0.0f, bestRy = 0.0f;
 					for(int ai = 0; ai < 8; ++ai)
 					{
 						const float ya = yaw0 + (float)ai * 0.3926991f;
@@ -3142,13 +3160,13 @@ namespace
 						const bool okr = EnvGroundH(player, fp.pos.x + f2.rx * 70.0f, fp.pos.y + f2.ry * 70.0f, e.pos.z, &hr2, NULL);
 						if(!((!okl || (hP - hl2) >= 50.0f) && (!okr || (hP - hr2) >= 50.0f))) continue;
 						float sc = 0.0f, sw = 0.0f;
-						if(BeamCenterAt(player, f2, 0.0f, hP, &sc, &sw) && sw <= 66.0f && sw < bestHalf) { bestHalf = sw; bestYaw = ya; found = true; }
+						if(BeamCenterAt(player, f2, 0.0f, hP, &sc, &sw) && sw <= 66.0f && sw < bestHalf) { bestHalf = sw; bestYaw = ya; bestC = sc; bestRx = f2.rx; bestRy = f2.ry; found = true; }
 					}
-					if(found) { g_aheadYaw = bestYaw; g_aheadTick = tn; }
+					if(found) { g_aheadYaw = bestYaw; g_aheadCx = fp.pos.x + bestRx * bestC; g_aheadCy = fp.pos.y + bestRy * bestC; g_aheadHalf = bestHalf; g_aheadTick = tn; }
 				}
 			}
 		}
-		// v0.26.2: fim da viga - 2 sondas a 35 e 70 ao longo do eixo (cada sentido) sobre a linha do centro; sem chao (ou queda >=50) = fim a vista
+		// v0.26.4: fim da viga - sondas a 25 (para), 45 (70%) e 70 (90%) ao longo do eixo sobre a linha do centro; so se sai saltando
 		if(g_cfg.beamEnd && g_envOnBeam && g_beamOk)
 		{
 			const float sh = sinf(g_beamHead), ch = cosf(g_beamHead);
@@ -3156,16 +3174,16 @@ namespace
 			for(int sd = 0; sd < 2; ++sd)
 			{
 				const float sg = sd ? -1.0f : 1.0f; float hh = 0.0f; float ef = 1.0f;
-				const bool o35 = EnvGroundH(player, cx + sh * 35.0f * sg, cy + ch * 35.0f * sg, e.pos.z, &hh, NULL);
-				if(!o35 || (h0 - hh) >= 50.0f) ef = 0.0f;
+				const bool o25 = EnvGroundH(player, cx + sh * 25.0f * sg, cy + ch * 25.0f * sg, e.pos.z, &hh, NULL);
+				if(!o25 || (h0 - hh) >= 50.0f) ef = 0.0f;
 				else
 				{
-					const bool o50 = EnvGroundH(player, cx + sh * 50.0f * sg, cy + ch * 50.0f * sg, e.pos.z, &hh, NULL);
-					if(!o50 || (h0 - hh) >= 50.0f) ef = 0.35f;
+					const bool o45 = EnvGroundH(player, cx + sh * 45.0f * sg, cy + ch * 45.0f * sg, e.pos.z, &hh, NULL);
+					if(!o45 || (h0 - hh) >= 50.0f) ef = 0.7f;
 					else
 					{
 						const bool o70 = EnvGroundH(player, cx + sh * 70.0f * sg, cy + ch * 70.0f * sg, e.pos.z, &hh, NULL);
-						if(!o70 || (h0 - hh) >= 50.0f) ef = 0.6f;
+						if(!o70 || (h0 - hh) >= 50.0f) ef = 0.9f;
 					}
 				}
 				g_endF[sd] = ef;
@@ -4886,25 +4904,53 @@ namespace
 			const bool grounded = s_rl ? (g_envAirState == 0) : (g_es.ok0 && g_es.vertPlayer < 15.0f);	// v0.26.3: ja preso, o jogo (estado de ar) decide, nao o raio central
 			if(!grounded) { if(!s_airSince) s_airSince = now; s_lastAir = now; } else s_airSince = 0;
 			const bool fresh = g_cfg.beamRail && g_envOnBeam && g_beamOk && (DWORD)(now - g_beamTick) < 1000 && g_es.ok0 && !IsMountedCam();
+			{
+				// v0.26.4: ENTRADA GARANTIDA - no salto guardou-se a linha da viga a frente; ao aterrar perto dela o trilho engata logo (sem esperar a deteccao)
+				static bool s_preAir = false;
+				if(g_prePending)
+				{
+					if((LONG)(g_preUntil - now) <= 0) { g_prePending = 0; s_preAir = false; }
+					else if(g_envAirState) s_preAir = true;
+					else if(s_preAir && !s_rl)
+					{
+						s_preAir = false; g_prePending = 0;
+						const float lt = (g_preCx - rp.x) * cosf(g_preHead) + (g_preCy - rp.y) * (-sinf(g_preHead));
+						const float al = (g_preCx - rp.x) * sinf(g_preHead) + (g_preCy - rp.y) * cosf(g_preHead);
+						if(g_cfg.beamRail && !IsMountedCam() && fabsf(lt) <= g_preHalf + 30.0f && fabsf(al) <= 140.0f)
+						{
+							s_rl = true; s_cx = g_preCx; s_cy = g_preCy; s_ch = g_preHead;
+							g_beamHead = g_preHead; g_beamLat = lt; g_beamHalf = g_preHalf; g_beamTick = now; g_beamOk = 1; g_envOnBeam = 1; s_lastFresh = g_beamTick;
+							_MESSAGE("beam rail: ON at landing (guided jump, line axis %.0f deg, offset %.0f, half-width %.0f)", g_preHead * 57.2958f, lt, g_preHalf);
+						}
+						else _MESSAGE("beam: guided jump landed %.0f from the line / %.0f along - no engage", lt, al);
+					}
+				}
+			}
 			if(fresh && grounded && g_beamTick != s_lastFresh && (s_rl || (DWORD)(now - s_lastAir) > 400))
 			{
 				s_lastFresh = g_beamTick;
 				const float hh = g_beamHead, ll = g_beamLat;
 				const float ncx = rp.x + cosf(hh) * ll, ncy = rp.y - sinf(hh) * ll;
 				if(!s_rl) { s_rl = true; s_cx = ncx; s_cy = ncy; s_ch = hh; _MESSAGE("beam rail: ON (line axis %.0f deg, offset %.0f)", hh * 57.2958f, ll); }
-				else if(fabsf(ll) < 20.0f) { s_cx = ncx; s_cy = ncy; s_ch = hh; }
+				else if(fabsf(ll) < 20.0f + g_beamHalf)
+				{
+					// v0.26.4: a linha acompanha a viga com filtro (centro 35%, rumo 25% e no maximo 0.15 rad por leitura) - sem "curvas"
+					s_cx += (ncx - s_cx) * 0.35f; s_cy += (ncy - s_cy) * 0.35f;
+					float dh = WrapPi(hh - s_ch) * 0.25f; if(dh > 0.15f) dh = 0.15f; if(dh < -0.15f) dh = -0.15f;
+					s_ch = WrapPi(s_ch + dh);
+				}
 			}
 			if(s_rl)
 			{
 				const float lat = (s_cx - rp.x) * cosf(s_ch) + (s_cy - rp.y) * (-sinf(s_ch));
 				if(!g_cfg.beamRail || IsMountedCam()) { s_rl = false; _MESSAGE("beam rail: OFF (disabled)"); }
 				else if(s_airSince && (DWORD)(now - s_airSince) > 120) { s_rl = false; _MESSAGE("beam rail: OFF (left the ground)"); }
-				else if(fabsf(lat) > 45.0f) { s_rl = false; _MESSAGE("beam rail: OFF (%.0f units from the line)", lat); }
+				else if(fabsf(lat) > 45.0f + g_beamHalf) { s_rl = false; _MESSAGE("beam rail: OFF (%.0f units from the line)", lat); }
 				else { g_railLat = lat; g_railHead = s_ch; g_railTick = now; g_railOn = 1; }
 			}
 			if(!s_rl) g_railOn = 0;
 		}
-		const bool ok = g_cfg.beamAssist && g_envOnBeam && g_beamOk && (DWORD)(now - g_beamTick) < 1000 && movingNow && !g_lockOwn && !g_active && !IsMountedCam();
+		const bool ok = g_cfg.beamAssist && g_cfg.beamCamSteer && g_envOnBeam && g_beamOk && (DWORD)(now - g_beamTick) < 1000 && movingNow && !g_lockOwn && !g_active && !IsMountedCam();
 		if(!ok)
 		{
 			// so desliga (e regista) depois de 400 ms seguidos sem condicoes: evita o liga/desliga a cada passo
@@ -5871,6 +5917,7 @@ namespace
 				else if(*control == strings->strafeRight)	g_kRight = held;
 				g_moveHeld = (g_kFwd || g_kBack || g_kLeft || g_kRight) ? 1 : 0;
 				// v0.26.1: BeamWalkLeap liga logo ao premir o salto em cima da viga / na zona de borda (antes de o jogo mudar de estado)
+				if(held && *control == strings->jump) g_guardRel = GetTickCount() + 1500;		// v0.26.4: saltar solta o EdgeGuard
 				if(held && *control == strings->jump)
 				{
 					static int s_jk = 0;
@@ -5884,6 +5931,7 @@ namespace
 						const float cur = Engine::Rotation(plj).z; float ax = g_aheadYaw;
 						if(fabsf(WrapPi(ax - cur)) > kPi * 0.5f) ax = WrapPi(ax + kPi);
 						g_alignYaw = ax; g_alignUntil = GetTickCount() + 450;
+						g_preCx = g_aheadCx; g_preCy = g_aheadCy; g_preHead = g_aheadYaw; g_preHalf = g_aheadHalf; g_preUntil = GetTickCount() + 1800; g_prePending = 1;
 						static int s_al = 0; if(s_al < 30) { ++s_al; _MESSAGE("beam: jump towards a beam ahead - body aligned to %.0f deg (was %.0f)", ax * 57.2958f, cur * 57.2958f); }
 					}
 				}
