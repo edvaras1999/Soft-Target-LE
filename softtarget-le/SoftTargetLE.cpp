@@ -36,7 +36,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.26.4 (viga: camera livre, linha suave, entrada garantida; EdgeGuard progressivo com libertacao)"
+#define PLUGIN_VERSION_STR	"0.26.5 (viga: rumo suave, sem linha fantasma; EdgeGuard com antecipacao; pausa em menus; arco/lock reposto)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -184,6 +184,7 @@ namespace
 		int		lockArrowTilt;		// v0.25.0: 1 = com o lock e um arco, a flecha sai mais reta (INI f1P/f3PArrowTiltUpAngle), reposto ao largar
 		int		beamRail;			// v0.25.0: 1 = em cima da viga o movimento lateral e removido (trilho) e o jogador e puxado ao centro
 		int		beamEnd;			// v0.26.2: 1 = no fim da viga o movimento abranda e para (soltar e premir outra vez deixa-te cair)
+		float	bowTiltRate;		// v0.26.5: graus/s maximos da inclinacao do corpo com arco+lock (suaviza o "zoom")
 		int		beamCamSteer;		// v0.26.4: 1 = o assist da viga roda a camera/corpo (antigo); 0 = camera livre, so o movimento e preso (default)
 		float	beamSpeed;			// v0.26.3: fator da velocidade ao longo da viga (0.3-1.0)
 		int		beamJumpAlign;		// v0.26.3: 1 = ao saltar para uma viga estreita a frente o corpo alinha-se com o eixo
@@ -318,7 +319,7 @@ namespace
 		{ "BowShoulderY",			'f', &g_cfg.bowShY,				0.0f },
 		{ "BowShoulderZ",			'f', &g_cfg.bowShZ,				10.0f },
 		{ "BowShoulderSwapKey",		'i', &g_cfg.bowSwapKey,			18.0f },
-		{ "BowLockCamera",			'i', &g_cfg.bowLockCamera,		0.0f },
+		{ "BowLockCamera",			'i', &g_cfg.bowLockCamera,		1.0f },
 		{ "LockAutoCombatOnly",		'i', &g_cfg.lockAutoCombatOnly,	1.0f },
 		{ "MoveLearnKey",			'i', &g_cfg.mvLearnKey,			68.0f },
 		{ "NoSoftTargetFirstPerson",'i', &g_cfg.noSoftFirstPerson,	1.0f },
@@ -345,6 +346,7 @@ namespace
 		{ "LockArrowTilt",			'i', &g_cfg.lockArrowTilt,		1.0f },
 		{ "BeamRail",				'i', &g_cfg.beamRail,			1.0f },
 		{ "BeamEndSlow",			'i', &g_cfg.beamEnd,			1.0f },
+		{ "BowTiltRate",			'f', &g_cfg.bowTiltRate,		60.0f },
 		{ "BeamCamSteer",			'i', &g_cfg.beamCamSteer,		0.0f },
 		{ "BeamSpeed",				'f', &g_cfg.beamSpeed,		0.85f },
 		{ "BeamJumpAlign",			'i', &g_cfg.beamJumpAlign,	1.0f },
@@ -1318,6 +1320,8 @@ namespace
 	volatile float	g_guardBase = 0.0f;
 	volatile DWORD	g_guardTick = 0;
 	volatile float	g_guardDist[8] = { 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f };	// v0.26.2: distancia a queda em cada direcao (15/30/R)
+	volatile LONG	g_menuGate = 0;				// v0.26.5: 1 = menu aberto (perks, lockpick, inventario...): nada escreve no jogo
+	volatile float	g_guardSpd = 0.0f;			// v0.26.5: velocidade horizontal (u/s) vista pelo EdgeGuard
 	volatile float	g_aheadCx = 0.0f, g_aheadCy = 0.0f, g_aheadHalf = 30.0f;	// v0.26.4: linha da viga vista a frente (centro, meia-largura)
 	volatile float	g_preCx = 0.0f, g_preCy = 0.0f, g_preHead = 0.0f, g_preHalf = 30.0f;	// linha guardada no salto (engate imediato ao aterrar)
 	volatile LONG	g_prePending = 0;
@@ -1708,6 +1712,15 @@ namespace
 		}
 		__except(EXCEPTION_EXECUTE_HANDLER) { }
 		return false;
+	}
+
+	// v0.26.5: atualiza g_menuGate (chamado na thread do jogo, no maximo de 100 em 100 ms)
+	bool MenuGateUpdate()
+	{
+		static DWORD s_t = 0;
+		const DWORD n = GetTickCount();
+		if((DWORD)(n - s_t) >= 100) { s_t = n; g_menuGate = MenuBlocksInput() ? 1 : 0; }
+		return g_menuGate != 0;
 	}
 
 	// v0.18.0: o motor controla o jogador (cenas, pacotes de script, mobilia...): o mod nao escreve rotacao nem camera.
@@ -2229,6 +2242,7 @@ namespace
 		{
 			Sleep((g_mvLearnState || g_mvWant || g_railOn || g_guardMask) ? PerfFastMin() : 10);
 			if(g_mvLearnState == 1 || g_mvLearnState == 2) { MvLearn(GetTickCount()); continue; }
+			if(g_menuGate) { g_mvHaveLast = 0; continue; }		// v0.26.5: nada de escrever o vetor de movimento com um menu aberto
 			const bool railNow = g_railOn && (DWORD)(GetTickCount() - g_railTick) <= 120;
 			const bool remapNow = g_mvWant && (DWORD)(GetTickCount() - g_mvWantTick) <= 120;
 			const bool guardNow = g_cfg.edgeGuard && g_guardMask && (DWORD)(GetTickCount() - g_guardTick) <= 400;
@@ -2904,27 +2918,41 @@ namespace
 			const float a = WrapPi(g_railHead - ref);
 			const float sa = sinf(a), ca = cosf(a);
 			float along = ix * sa + iy * ca;
+			const DWORD tn = GetTickCount();
 			{
-				// v0.26.2: CONVERTE em vez de remover - o input que vai de lado vira movimento ao longo da viga (no sentido da tua intencao),
-				// com pelo menos 60% da velocidade. Antes um eixo perpendicular ao input anulava o movimento e ficavas parado.
-				const float sg = along >= 0.0f ? 1.0f : -1.0f; float aa = fabsf(along); const float mn = 0.6f * len; if(aa < mn) aa = mn;
-				along = sg * aa * (g_shiftHeld ? 1.0f : g_cfg.beamSpeed);	// v0.26.4: BeamSpeed; com Shift (correr) sem reducao
-				// fim da viga: abranda (70 -> 60%, 50 -> 35%) e para (30 -> 0); soltar e premir de novo liberta 1,5 s
+				// v0.26.5: o sentido (frente/tras) fica fixo e so inverte se pedires claramente o contrario durante 250 ms; o input de lado vira movimento ao longo
+				// da viga (>= 60% da velocidade); mantem-se o BeamSpeed (sem reducao com Shift) e o fim da viga.
+				static float s_sg = 0.0f; static DWORD s_sgT = 0, s_call = 0;
+				if(s_sg == 0.0f || (DWORD)(tn - s_call) > 300) { s_sg = along >= 0.0f ? 1.0f : -1.0f; s_sgT = 0; }
+				s_call = tn;
+				const float raw = along >= 0.0f ? 1.0f : -1.0f;
+				if(raw != s_sg)
+				{
+					if(fabsf(along) > 0.35f * len) { if(!s_sgT) s_sgT = tn; else if((DWORD)(tn - s_sgT) > 250) { s_sg = raw; s_sgT = 0; } }
+					else s_sgT = 0;
+				}
+				else s_sgT = 0;
+				float aa = fabsf(along); const float mn = 0.6f * len; if(aa < mn) aa = mn;
+				along = s_sg * aa * (g_shiftHeld ? 1.0f : g_cfg.beamSpeed);
 				if(g_cfg.beamEnd)
 				{
 					const float ef = g_endF[along >= 0.0f ? 0 : 1];
-					if(ef < 0.999f) along *= ef;		// v0.26.4: no fim da viga so se sai saltando
+					if(ef < 0.999f) along *= ef;		// no fim da viga so se sai saltando
 				}
 			}
 			const float lat = g_railLat;
-			// v0.26.4: zona morta e puxao adaptam-se a largura da superficie; puxao limitado a 0.35 e nulo quando parado (fim da viga)
-			float hw = g_beamHalf; if(hw < 10.0f) hw = 10.0f; if(hw > 60.0f) hw = 60.0f;
+			// v0.26.5: correcao por ROTACAO DO RUMO (como o equilibrio no Assassin's Creed): o movimento segue a tangente e inclina-se no maximo 14 graus
+			// para o centro, suavizado (EMA 250 ms). Sem somar movimento lateral: o corpo nao treme e a orientacao segue a viga.
+			float hw = g_beamHalf; if(hw < 6.0f) hw = 6.0f; if(hw > 60.0f) hw = 60.0f;
 			const float dz = 1.5f + 0.1f * hw;
-			float corr = fabsf(lat) <= dz ? 0.0f : (lat - (lat > 0.0f ? dz : -dz)) / (6.0f + 0.5f * hw);
-			if(corr > 0.35f) corr = 0.35f; if(corr < -0.35f) corr = -0.35f;
-			corr *= (len > 1.0f ? 1.0f : len);
-			{ const float aA = fabsf(along) / 0.4f; if(aA < 1.0f) corr *= aA; }
-			float nx = along * sa + corr * ca, ny = along * ca - corr * sa;
+			float th = fabsf(lat) <= dz ? 0.0f : (lat - (lat > 0.0f ? dz : -dz)) / (hw + 8.0f);
+			if(th > 1.0f) th = 1.0f; if(th < -1.0f) th = -1.0f;
+			th *= 0.2443f;		// 14 graus
+			static float s_th = 0.0f; static DWORD s_tht = 0;
+			{ const DWORD dtm = s_tht ? (DWORD)(tn - s_tht) : 100; s_tht = tn; const float al = dtm > 300 ? 1.0f : 1.0f - expf(-(float)dtm / 250.0f); s_th += (th - s_th) * al; }
+			const float aMag = fabsf(along), sgn = along >= 0.0f ? 1.0f : -1.0f;
+			float nx = aMag * (sgn * sa * cosf(s_th) + ca * sinf(s_th)), ny = aMag * (sgn * ca * cosf(s_th) - sa * sinf(s_th));
+			const float corr = sinf(s_th);
 			const float nl2 = sqrtf(nx * nx + ny * ny);
 			if(nl2 > 1.0f) { nx /= nl2; ny /= nl2; }
 			const float lateralIn = ix * ca - iy * sa;
@@ -2971,7 +2999,7 @@ namespace
 			for(int k = 0; k < 8; ++k)
 			{
 				float tf = 1.0f;
-				if(m & (1u << k)) { tf = (g_guardDist[k] - 12.0f) / 23.0f; if(tf < 0.0f) tf = 0.0f; if(tf > 1.0f) tf = 1.0f; }
+				if(m & (1u << k)) { tf = (g_guardDist[k] - 12.0f) / (23.0f + 0.25f * g_guardSpd); if(tf < 0.0f) tf = 0.0f; if(tf > 1.0f) tf = 1.0f; }
 				s_f[k] += (tf - s_f[k]) * al;
 				if(s_f[k] >= 0.98f) continue;
 				const float a = WrapPi(g_guardBase + (float)k * 0.7853982f - ref);
@@ -3035,37 +3063,50 @@ namespace
 		g_es.slope = acosf(nz0 > 1.0f ? 1.0f : (nz0 < -1.0f ? -1.0f : nz0)) * 57.2958f;
 		EnvSet(3, g_es.vertPlayer); EnvSet(4, g_es.slope);
 		if(!(g_envNeed & kNeedBeam)) return;
-		// v0.26.2: ZONA DE BORDA com distancia a queda por direcao. 8 direcoes a 35 (50 se ja estiver ligada = histerese); onde ha queda >=100 refina-se
-		// a 30 e a 15. g_guardDist alimenta o EdgeGuard gradual.
+		// v0.26.5: ZONA DE BORDA + EdgeGuard com ANTECIPACAO. 8 direcoes a 35 (50 se a zona ja esta ligada). Nas direcoes dentro de ~50 graus do movimento
+		// o alcance cresce com a velocidade (ate ~150 unidades: a correr atravessas 35-50 unidades em menos de 100 ms). Onde ha queda refina-se por
+		// 90/65/50/40/30/22/15. O EdgeGuard usa estas distancias SEM debounce (o debounce de 150/300 ms fica so para a animacao da viga).
 		{
-			static DWORD s_ezSince = 0, s_ezLost = 0;
+			static DWORD s_ezSince = 0, s_ezLost = 0, s_pt = 0; static float s_px = 0.0f, s_py = 0.0f, s_spd = 0.0f, s_mdir = 0.0f;
 			const DWORD tz = GetTickCount();
+			if(s_pt)
+			{
+				const float dtp = (float)(tz - s_pt) * 0.001f;
+				if(dtp > 0.01f && dtp < 0.5f)
+				{
+					const float dx = e.pos.x - s_px, dy = e.pos.y - s_py, sp = sqrtf(dx * dx + dy * dy) / dtp;
+					s_spd += (sp - s_spd) * 0.5f; if(sp > 40.0f) s_mdir = atan2f(dx, dy);
+				}
+				else if(dtp >= 0.5f) s_spd = 0.0f;
+			}
+			s_pt = tz; s_px = e.pos.x; s_py = e.pos.y; g_guardSpd = s_spd;
 			bool ez = false; unsigned gm = 0; float gd[8];
 			for(int k = 0; k < 8; ++k) gd[k] = 999.0f;
 			const float yawb = atan2f(e.fx, e.fy);
 			if(g_cfg.edgeZone && g_es.ok0 && g_es.vertPlayer < 15.0f && !g_envAirState)
 			{
 				const float R = g_envEdgeZone ? 50.0f : 35.0f;
+				float farR = 35.0f + s_spd * 0.30f; if(farR > 150.0f) farR = 150.0f;
+				static const float kD[7] = { 90.0f, 65.0f, 50.0f, 40.0f, 30.0f, 22.0f, 15.0f };
 				for(int k = 0; k < 8; ++k)
 				{
 					const float ya = yawb + (float)k * 0.7853982f, sx = sinf(ya), sy = cosf(ya);
+					const bool lead = s_spd > 60.0f && fabsf(WrapPi(ya - s_mdir)) <= 0.9f;
+					const float Rk = (lead && farR > R) ? farR : R;
 					{
-						// v0.26.3: uma parede/obstaculo nessa direcao nao e queda (o raio para baixo ficava sem chao dentro da parede)
+						// uma parede/obstaculo nessa direcao nao e queda (o raio para baixo ficava sem chao dentro da parede)
 						EnvRay wr;
-						if(EnvCast(player, e.pos.x, e.pos.y, e.pos.z + 40.0f, sx, sy, 0.0f, R + 10.0f, 3, &wr) && wr.hit) continue;
+						if(EnvCast(player, e.pos.x, e.pos.y, e.pos.z + 40.0f, sx, sy, 0.0f, Rk + 10.0f, 3, &wr) && wr.hit) continue;
 					}
 					float hp = 0.0f;
-					bool ok = EnvGroundH(player, e.pos.x + sx * R, e.pos.y + sy * R, e.pos.z, &hp, NULL);
+					bool ok = EnvGroundH(player, e.pos.x + sx * Rk, e.pos.y + sy * Rk, e.pos.z, &hp, NULL);
 					if(!(!ok || (h0 - hp) >= (float)g_cfg.edgeDropMin)) continue;
-					float dist = R;
+					float dist = Rk;
+					for(int di = 0; di < 7; ++di)
 					{
-						static const float kD[4] = { 40.0f, 30.0f, 22.0f, 15.0f };
-						for(int di = 0; di < 4; ++di)
-						{
-							if(kD[di] >= R) continue;
-							ok = EnvGroundH(player, e.pos.x + sx * kD[di], e.pos.y + sy * kD[di], e.pos.z, &hp, NULL);
-							if(!ok || (h0 - hp) >= (float)g_cfg.edgeDropMin) dist = kD[di]; else break;
-						}
+						if(kD[di] >= Rk) continue;
+						ok = EnvGroundH(player, e.pos.x + sx * kD[di], e.pos.y + sy * kD[di], e.pos.z, &hp, NULL);
+						if(!ok || (h0 - hp) >= (float)g_cfg.edgeDropMin) dist = kD[di]; else break;
 					}
 					gd[k] = dist; gm |= 1u << k; ez = true;
 				}
@@ -3074,7 +3115,7 @@ namespace
 			else { s_ezSince = 0; if(!s_ezLost) s_ezLost = tz; }
 			if(ez && (DWORD)(tz - s_ezSince) >= 150 && !g_envEdgeZone) { g_envEdgeZone = 1; _MESSAGE("env: edge zone ON (drop within 35 units)"); }
 			else if(!ez && g_envEdgeZone && s_ezLost && (DWORD)(tz - s_ezLost) >= 300) { g_envEdgeZone = 0; _MESSAGE("env: edge zone OFF"); }
-			if(g_envEdgeZone && gm) { for(int k = 0; k < 8; ++k) g_guardDist[k] = gd[k]; g_guardBase = yawb; g_guardMask = (LONG)gm; g_guardTick = tz; }
+			if(gm) { for(int k = 0; k < 8; ++k) g_guardDist[k] = gd[k]; g_guardBase = yawb; g_guardMask = (LONG)gm; g_guardTick = tz; }
 			else g_guardMask = 0;
 		}
 		// viga: chao pouco inclinado e queda >= 50 a pelo menos um dos lados (a 45 do centro), mantido 0.2 s
@@ -3105,7 +3146,7 @@ namespace
 		if(cand && !(g_beamOk && (DWORD)(tn - g_beamTick) < 1000)) { g_beamHead = bestYaw; g_beamTick = tn; g_beamOk = 1; g_beamLat = 0.0f; g_beamHalf = bestHalf; }
 		if(cand) { if(!s_beamSince) s_beamSince = tn; s_beamLost = 0; }
 		else { s_beamSince = 0; if(!s_beamLost) s_beamLost = tn; }
-		if(cand && (DWORD)(tn - s_beamSince) >= 200 && !g_envOnBeam) { g_envOnBeam = 1; _MESSAGE("env: BeamWalkOnBeam ON (drop left %s / right %s)", dropL ? "yes" : "no", dropR ? "yes" : "no"); }
+		if(cand && (DWORD)(tn - s_beamSince) >= ((DWORD)(tn - g_aheadTick) < 2500 ? 100u : 200u) && !g_envOnBeam) { g_envOnBeam = 1; _MESSAGE("env: BeamWalkOnBeam ON (drop left %s / right %s)", dropL ? "yes" : "no", dropR ? "yes" : "no"); }
 		else if(!cand && g_envOnBeam && s_beamLost && (DWORD)(tn - s_beamLost) >= (g_railOn ? 900u : 600u)) { g_envOnBeam = 0; _MESSAGE("env: BeamWalkOnBeam OFF"); }
 		EnvSet(kEnvOnBeam, (g_envOnBeam || g_envEdgeZone) ? 1.0f : 0.0f);
 		if(g_cfg.beamAssist && (g_envOnBeam || cand))
@@ -3144,9 +3185,9 @@ namespace
 				s_laT = tn;
 				const float yaw0 = atan2f(e.fx, e.fy);
 				bool found = false;
-				for(int di = 0; di < 2 && !found; ++di)
+				for(int di = 0; di < 3 && !found; ++di)
 				{
-					const float dA = di ? 120.0f : 80.0f;
+					const float dA = di == 0 ? 60.0f : (di == 1 ? 100.0f : 140.0f);
 					EnvPos fp = e; fp.pos.x = e.pos.x + e.fx * dA; fp.pos.y = e.pos.y + e.fy * dA;
 					float hP = 0.0f;
 					if(!EnvGroundH(player, fp.pos.x, fp.pos.y, e.pos.z, &hP, NULL) || hP < -60.0f || hP > 100.0f) continue;
@@ -3298,6 +3339,7 @@ namespace
 	void EnvMeasure()
 	{
 		if(g_envDead || !g_cfg.envProbe || !g_gameLive) return;
+		if(MenuGateUpdate()) return;		// v0.26.5: com um menu aberto (perks, lockpick, inventario, carregamento...) os sensores nao lancam raios
 		if(g_frameLastMs > 150.0f) { g_frameLastMs = 16.0f; return; }		// v0.26.0: soluco / carregamento - salta este ciclo e retoma
 		PlayerCharacter * player = Engine::Player();
 		if(!player) return;
@@ -3337,7 +3379,7 @@ namespace
 			const float fmx = g_frameMs;
 			const DWORD mulF = fmx > 33.0f ? (DWORD)(fmx / 33.0f > 4.0f ? 4.0f : fmx / 33.0f) : 1;
 			const DWORD mul = (g_envIdle ? 2 : 1) * (mulF < 1 ? 1 : mulF);
-			if((g_envOnBeam || g_envEdgeZone) && (g_envNeed & (kNeedGround | kNeedBeam)) && (int)(s_next[0] - now) > 80) s_next[0] = now + 80;	// v0.26.2: em viga/borda o chao le-se a cada ~80 ms
+			if((g_envOnBeam || g_envEdgeZone || (g_cfg.edgeGuard && g_moveHeld)) && (g_envNeed & (kNeedGround | kNeedBeam)) && (int)(s_next[0] - now) > 80) s_next[0] = now + 80;	// v0.26.2: em viga/borda o chao le-se a cada ~80 ms
 			if(g_envAirState && (g_envNeed & (kNeedGround | kNeedBeam))) s_next[0] = now;		// no ar o chao le-se a cada ciclo (altura da queda)
 			const LONG need = g_envNeed;
 			++s_tick;
@@ -4864,6 +4906,7 @@ namespace
 		static DWORD s_lastOk = 0, s_dg = 0; static int s_dn = 0;
 		static float s_ppx = 0.0f, s_ppy = 0.0f; static DWORD s_pt = 0, s_mvT = 0;
 		g_envNeedMirror = g_envNeed;
+		if(MenuGateUpdate()) { g_railOn = 0; g_guardMask = 0; return; }		// v0.26.5
 		if((LONG)(g_alignUntil - now) > 0 && !g_lockOwn && !g_active)
 		{
 			// v0.26.3: salto guiado - o corpo roda depressa para o eixo da viga durante o salto
@@ -4903,6 +4946,8 @@ namespace
 			const NiPoint3 rp = Engine::Position(player);
 			const bool grounded = s_rl ? (g_envAirState == 0) : (g_es.ok0 && g_es.vertPlayer < 15.0f);	// v0.26.3: ja preso, o jogo (estado de ar) decide, nao o raio central
 			if(!grounded) { if(!s_airSince) s_airSince = now; s_lastAir = now; } else s_airSince = 0;
+			static DWORD s_noBeamSince = 0;
+			if(g_envOnBeam) s_noBeamSince = now; else if(!s_noBeamSince) s_noBeamSince = now;		// v0.26.5: a linha so vive enquanto ha viga detetada
 			const bool fresh = g_cfg.beamRail && g_envOnBeam && g_beamOk && (DWORD)(now - g_beamTick) < 1000 && g_es.ok0 && !IsMountedCam();
 			{
 				// v0.26.4: ENTRADA GARANTIDA - no salto guardou-se a linha da viga a frente; ao aterrar perto dela o trilho engata logo (sem esperar a deteccao)
@@ -4926,7 +4971,7 @@ namespace
 					}
 				}
 			}
-			if(fresh && grounded && g_beamTick != s_lastFresh && (s_rl || (DWORD)(now - s_lastAir) > 400))
+			if(fresh && grounded && g_beamTick != s_lastFresh && (s_rl || (DWORD)(now - s_lastAir) > 150))
 			{
 				s_lastFresh = g_beamTick;
 				const float hh = g_beamHead, ll = g_beamLat;
@@ -4945,6 +4990,7 @@ namespace
 				const float lat = (s_cx - rp.x) * cosf(s_ch) + (s_cy - rp.y) * (-sinf(s_ch));
 				if(!g_cfg.beamRail || IsMountedCam()) { s_rl = false; _MESSAGE("beam rail: OFF (disabled)"); }
 				else if(s_airSince && (DWORD)(now - s_airSince) > 120) { s_rl = false; _MESSAGE("beam rail: OFF (left the ground)"); }
+				else if(!g_envOnBeam && (DWORD)(now - s_noBeamSince) > 300) { s_rl = false; _MESSAGE("beam rail: OFF (no beam detected any more)"); }
 				else if(fabsf(lat) > 45.0f + g_beamHalf) { s_rl = false; _MESSAGE("beam rail: OFF (%.0f units from the line)", lat); }
 				else { g_railLat = lat; g_railHead = s_ch; g_railTick = now; g_railOn = 1; }
 			}
@@ -5428,12 +5474,12 @@ namespace
 						{
 							const float eff = fabsf(s_pendP) <= softDz ? 0.0f : s_pendP - (s_pendP > 0.0f ? softDz : -softDz);
 							const float frac = viewHard ? 1.0f : 1.0f - expf(-dt * (softSm > 1.0f ? softSm : 15.0f));
-							float st = eff * frac; const float lim = softMax * dt;
+							float st = eff * frac; const float lim = ((BowEquipped(player) && g_cfg.bowTiltRate > 1.0f && softMax > g_cfg.bowTiltRate * kPi / 180.0f) ? g_cfg.bowTiltRate * kPi / 180.0f : softMax) * dt;
 							if(st > lim) st = lim; if(st < -lim) st = -lim;
 							s_pendP -= st; rot.x -= st;		// positivo = olhar para baixo
 						}
 					}
-					else rot.x += StepToward(rot.x, -up * vSign, false, dt, maxRad, g_cfg.smoothing);	// positivo = olhar para baixo
+					else rot.x += StepToward(rot.x, -up * vSign, false, dt, (BowEquipped(player) && g_cfg.bowTiltRate > 1.0f && maxRad > g_cfg.bowTiltRate * kPi / 180.0f) ? g_cfg.bowTiltRate * kPi / 180.0f : maxRad, g_cfg.smoothing);	// positivo = olhar para baixo
 					if(!firstPerson) tiltUsed = true;		// em primeira pessoa rot.x e a propria vista: nao se repoe
 				}
 				else if(tiltUsed)
