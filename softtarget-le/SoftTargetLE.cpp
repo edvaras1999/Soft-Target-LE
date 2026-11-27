@@ -36,7 +36,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.26.5 (viga: rumo suave, sem linha fantasma; EdgeGuard com antecipacao; pausa em menus; arco/lock reposto)"
+#define PLUGIN_VERSION_STR	"0.26.6 (viga: corpo alinhado a viga, EdgeGuard desligado na viga, zona morta proporcional)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -1314,6 +1314,8 @@ namespace
 	volatile float	g_frameMs = 20.0f;			// v0.25.1: tempo de frame medio (EMA)
 	volatile float	g_frameLastMs = 16.0f;		// v0.26.0: ultimo frame (para saltar solucos)
 	volatile float	g_railLat = 0.0f, g_railHead = 0.0f;
+	volatile LONG	g_envOnBeam = 0;		// 1 = em cima de uma viga/passadico estreito (para BeamWalkLeap)
+	volatile float	g_railDir = 0.0f;			// v0.26.6: sentido de marcha ao longo da viga (+1 / -1), publicado pelo MvRail
 	volatile LONG	g_railOn = 0;				// v0.25.0: trilho da viga ativo
 	volatile DWORD	g_railTick = 0;
 	volatile LONG	g_guardMask = 0;			// v0.26.1: bits (0-7) das direcoes com queda a <20 (cada bit = base + k*45 graus)
@@ -2245,7 +2247,7 @@ namespace
 			if(g_menuGate) { g_mvHaveLast = 0; continue; }		// v0.26.5: nada de escrever o vetor de movimento com um menu aberto
 			const bool railNow = g_railOn && (DWORD)(GetTickCount() - g_railTick) <= 120;
 			const bool remapNow = g_mvWant && (DWORD)(GetTickCount() - g_mvWantTick) <= 120;
-			const bool guardNow = g_cfg.edgeGuard && g_guardMask && (DWORD)(GetTickCount() - g_guardTick) <= 400;
+			const bool guardNow = g_cfg.edgeGuard && g_guardMask && !railNow && !g_envOnBeam && (DWORD)(GetTickCount() - g_guardTick) <= 400;		// v0.26.6: na viga mandam o trilho e a paragem no fim
 			if(!g_mvFound || (!remapNow && !railNow && !guardNow)) { g_mvHaveLast = 0; continue; }
 			__try
 			{
@@ -2575,7 +2577,6 @@ namespace
 	volatile LONG	g_envNeed = 0x3F;		// grupos de sensores necessarios (tabela de demanda)
 	enum { kNeedFwd = 1, kNeedGround = 2, kNeedFront = 4, kNeedWall = 8, kNeedLedge = 16, kNeedBeam = 32 };
 	volatile LONG	g_envIdle = 0;			// 1 = parado e sem obstaculo: a leitura abranda
-	volatile LONG	g_envOnBeam = 0;		// 1 = em cima de uma viga/passadico estreito (para BeamWalkLeap)
 	volatile float	g_envObsH = 0.0f;		// ultima altura do obstaculo a frente (para o ST_JumpObstacle)
 
 	void EnvResolveMod()
@@ -2934,6 +2935,7 @@ namespace
 				else s_sgT = 0;
 				float aa = fabsf(along); const float mn = 0.6f * len; if(aa < mn) aa = mn;
 				along = s_sg * aa * (g_shiftHeld ? 1.0f : g_cfg.beamSpeed);
+				g_railDir = s_sg;
 				if(g_cfg.beamEnd)
 				{
 					const float ef = g_endF[along >= 0.0f ? 0 : 1];
@@ -2944,7 +2946,7 @@ namespace
 			// v0.26.5: correcao por ROTACAO DO RUMO (como o equilibrio no Assassin's Creed): o movimento segue a tangente e inclina-se no maximo 14 graus
 			// para o centro, suavizado (EMA 250 ms). Sem somar movimento lateral: o corpo nao treme e a orientacao segue a viga.
 			float hw = g_beamHalf; if(hw < 6.0f) hw = 6.0f; if(hw > 60.0f) hw = 60.0f;
-			const float dz = 1.5f + 0.1f * hw;
+			const float dz = 1.0f + 0.35f * hw;		// v0.26.6: proporcional a largura (vigas finas nao saltam de lado)
 			float th = fabsf(lat) <= dz ? 0.0f : (lat - (lat > 0.0f ? dz : -dz)) / (hw + 8.0f);
 			if(th > 1.0f) th = 1.0f; if(th < -1.0f) th = -1.0f;
 			th *= 0.2443f;		// 14 graus
@@ -4995,6 +4997,17 @@ namespace
 				else { g_railLat = lat; g_railHead = s_ch; g_railTick = now; g_railOn = 1; }
 			}
 			if(!s_rl) g_railOn = 0;
+			else if(g_railOn && g_moveHeld && !g_lockOwn && !g_active && g_railDir != 0.0f && (LONG)(g_alignUntil - now) <= 0)
+			{
+				// v0.26.6: o corpo acompanha a direcao de marcha ao longo da viga (sem andar de lado); a camera continua livre
+				NiPoint3 & rb = Engine::Rotation(player);
+				const float tgt = WrapPi(g_railHead + (g_railDir < 0.0f ? kPi : 0.0f));
+				float st = WrapPi(tgt - rb.z); st *= (1.0f - expf(-dt / 0.10f));
+				const float lm = 8.0f * dt; if(st > lm) st = lm; if(st < -lm) st = -lm;
+				rb.z = WrapPi(rb.z + st);
+				static int s_bl = 0; static DWORD s_blT = 0;
+				if(s_bl < 12 && (DWORD)(now - s_blT) >= 1000) { s_blT = now; ++s_bl; _MESSAGE("beam rail: body aligned to travel (target %.0f deg, error %.0f deg)", tgt * 57.2958f, WrapPi(tgt - rb.z) * 57.2958f); }
+			}
 		}
 		const bool ok = g_cfg.beamAssist && g_cfg.beamCamSteer && g_envOnBeam && g_beamOk && (DWORD)(now - g_beamTick) < 1000 && movingNow && !g_lockOwn && !g_active && !IsMountedCam();
 		if(!ok)
