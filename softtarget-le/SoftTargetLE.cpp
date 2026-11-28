@@ -36,7 +36,7 @@
 #include <stdlib.h>
 
 #define PLUGIN_NAME			"SoftTargetLE"
-#define PLUGIN_VERSION_STR	"0.26.6 (viga: corpo alinhado a viga, EdgeGuard desligado na viga, zona morta proporcional)"
+#define PLUGIN_VERSION_STR	"0.27.0 (MCM e INI reorganizados; perfil automatico; Keytrace/DMK em 3 modos; viga: corpo livre como na 0.26.5)"
 #define PLUGIN_LOG_FILE		"\\My Games\\Skyrim\\SKSE\\SoftTargetLE.log"
 #define PLUGIN_INI_NAME		"SoftTargetLE.ini"
 #define PLUGIN_INI_FALLBACK	"Data\\SKSE\\Plugins\\SoftTargetLE.ini"
@@ -87,6 +87,9 @@ namespace
 		int		verticalInvert;	// 1 = inverte o sentido da inclinacao
 		float	verticalLimitDeg;// inclinacao maxima, em graus
 		int		language;		// idioma do menu: 0 = ingles, 1 = portugues
+		int		profileAuto;	// v0.27.0: 1 = perfil automatico (arma na mao = FreeCam/Coeus, senao normal)
+		int		dmkMode;		// v0.27.0: 0 desligado, 1 ligado, 2 so em combate (variaveis DMK)
+		int		ktMode;			// v0.27.0: 0 desligado, 1 ligado, 2 so em combate com lock/SoftTarget (mascara Keytrace)
 		int		profileMode;	// 0 = normal (sem TDM, ou Coeus com EnableUnsheathed=0), 1 = TDM (movimento direcional)
 		int		lockOnSwitchKey;// tecla para trocar de alvo no lock-on (0 = a que a LockOn.dll indica)
 		int		allowReanimated;// 1 = aceita inimigos reanimados / sem estado de vida normal
@@ -254,12 +257,13 @@ namespace
 		{ "LockOnKey",				'i', &g_cfg.lockOnKey,			0.0f },
 		{ "LockOnMode",				'i', &g_cfg.lockOnMode,			0.0f },
 		{ "CoeusYield",				'i', &g_cfg.coeusYield,			0.0f },
-		{ "VerticalMode",			'i', &g_cfg.verticalMode,		0.0f },
+		{ "VerticalMode",			'i', &g_cfg.verticalMode,		1.0f },
 		{ "AimHeight",				'f', &g_cfg.aimHeight,			100.0f },
 		{ "PlayerAimHeight",		'f', &g_cfg.playerAimHeight,	110.0f },
 		{ "VerticalInvert",			'i', &g_cfg.verticalInvert,		0.0f },
 		{ "VerticalLimitDegrees",	'f', &g_cfg.verticalLimitDeg,	45.0f },
 		{ "Language",				'i', &g_cfg.language,			0.0f },
+		{ "ProfileAuto",			'i', &g_cfg.profileAuto,		1.0f },
 		{ "ProfileMode",			'i', &g_cfg.profileMode,		1.0f },
 		{ "LockOnSwitchKey",		'i', &g_cfg.lockOnSwitchKey,	0.0f },
 		{ "AllowReanimated",		'i', &g_cfg.allowReanimated,	1.0f },
@@ -332,8 +336,8 @@ namespace
 		{ "LockSoftSpeedDegPerSec",	'f', &g_cfg.lockSoftSpeedDeg,	240.0f },
 		{ "LockSoftDeadZoneDegrees",'f', &g_cfg.lockSoftDeadZone,	0.6f },
 		{ "LevelPosture",			'i', &g_cfg.levelPosture,		1.0f },
-		{ "DmkCompat",				'i', &g_cfg.dmkCompat,			0.0f },
-		{ "DmkKeytrace",			'i', &g_cfg.dmkKeytrace,		1.0f },
+		{ "DmkMode",				'i', &g_cfg.dmkMode,			0.0f },
+		{ "KeytraceMode",			'i', &g_cfg.ktMode,			2.0f },
 		{ "BowReleaseTailMs",		'i', &g_cfg.bowReleaseTailMs,	400.0f },
 		{ "LosWaitMs",				'i', &g_cfg.losWaitMs,			40.0f },
 		{ "LosGraceMs",				'i', &g_cfg.losGraceMs,			1500.0f },
@@ -369,7 +373,6 @@ namespace
 		{ "ObstacleJumpBonus",		'i', &g_cfg.jumpBonus,			1.0f },
 		{ "ObstacleJumpClearance",	'f', &g_cfg.jumpClearance,		40.0f },
 		{ "ObstacleJumpMaxMult",	'f', &g_cfg.jumpMaxMult,		3.3f },
-		{ "KeytraceCombatOnly",		'i', &g_cfg.keytraceCombatOnly,	1.0f },
 		{ "EnvSprintDistance",		'f', &g_cfg.envSprintDist,		330.0f },
 		{ "LockIgnoreEssential",	'i', &g_cfg.lockIgnoreEssential,1.0f },
 		{ "LockMounted",			'i', &g_cfg.lockMounted,		1.0f },
@@ -467,6 +470,19 @@ namespace
 		if(g_iniPath[0] && GetFileAttributesExA(g_iniPath, GetFileExInfoStandard, &d)) g_iniStamp = d.ftLastWriteTime;
 	}
 
+	// v0.27.0: campos derivados (nao estao no ini): os modos Keytrace/DMK de 3 estados alimentam os interruptores antigos
+	void ApplyDerived()
+	{
+		if(g_cfg.dmkMode < 0) g_cfg.dmkMode = 0;
+		if(g_cfg.dmkMode > 2) g_cfg.dmkMode = 2;
+		if(g_cfg.ktMode < 0) g_cfg.ktMode = 0;
+		if(g_cfg.ktMode > 2) g_cfg.ktMode = 2;
+		g_cfg.profileAuto = g_cfg.profileAuto ? 1 : 0;
+		g_cfg.dmkCompat = g_cfg.dmkMode > 0 ? 1 : 0;
+		g_cfg.dmkKeytrace = g_cfg.ktMode > 0 ? 1 : 0;
+		g_cfg.keytraceCombatOnly = g_cfg.ktMode == 2 ? 1 : 0;
+	}
+
 	void LoadConfig()
 	{
 		const bool found = g_iniPath[0] && FileExists(g_iniPath);
@@ -527,10 +543,6 @@ namespace
 		if(g_cfg.lockSoftDeadZone > 5.0f)	g_cfg.lockSoftDeadZone = 5.0f;
 		if(g_cfg.levelPosture < 0)			g_cfg.levelPosture = 0;
 		if(g_cfg.levelPosture > 1)			g_cfg.levelPosture = 1;
-		if(g_cfg.dmkCompat < 0)				g_cfg.dmkCompat = 0;
-		if(g_cfg.dmkCompat > 1)				g_cfg.dmkCompat = 1;
-		if(g_cfg.dmkKeytrace < 0)			g_cfg.dmkKeytrace = 0;
-		if(g_cfg.dmkKeytrace > 1)			g_cfg.dmkKeytrace = 1;
 		if(g_cfg.speedScale < 20.0f)		g_cfg.speedScale = 20.0f;
 		if(g_cfg.speedScale > 300.0f)		g_cfg.speedScale = 300.0f;
 		if(g_cfg.aimOffX < -20.0f)			g_cfg.aimOffX = -20.0f;
@@ -591,8 +603,6 @@ namespace
 		if(g_cfg.jumpClearance > 100.0f) g_cfg.jumpClearance = 100.0f;
 		if(g_cfg.jumpMaxMult < 1.0f) g_cfg.jumpMaxMult = 1.0f;
 		if(g_cfg.jumpMaxMult > 4.0f) g_cfg.jumpMaxMult = 4.0f;
-		if(g_cfg.keytraceCombatOnly < 0) g_cfg.keytraceCombatOnly = 0;
-		if(g_cfg.keytraceCombatOnly > 1) g_cfg.keytraceCombatOnly = 1;
 		if(g_cfg.requireLos < 0) g_cfg.requireLos = 0;
 		if(g_cfg.requireLos > 1) g_cfg.requireLos = 1;
 		if(g_cfg.keepBleedout < 0) g_cfg.keepBleedout = 0;
@@ -606,6 +616,17 @@ namespace
 		if(g_cfg.updateMs < 1)		g_cfg.updateMs = 1;
 		if(g_cfg.updateMs > 50)		g_cfg.updateMs = 50;
 		if(g_cfg.retargetMs < 16)	g_cfg.retargetMs = 16;
+
+		// migracao de um .ini antigo quando as chaves novas nao existem
+		if(found)
+		{
+			char tmp[16];
+			GetPrivateProfileStringA("SoftTarget", "DmkMode", "", tmp, sizeof(tmp), g_iniPath);
+			if(!tmp[0]) g_cfg.dmkMode = ReadInt("DmkCompat", 0) ? 1 : 0;
+			GetPrivateProfileStringA("SoftTarget", "KeytraceMode", "", tmp, sizeof(tmp), g_iniPath);
+			if(!tmp[0]) g_cfg.ktMode = ReadInt("DmkKeytrace", 1) ? (ReadInt("KeytraceCombatOnly", 1) ? 2 : 1) : 0;
+		}
+		ApplyDerived();
 
 		_MESSAGE("config (%s%s): enabled=%d logOnly=%d shape=%s range=%.0f cone=%.0f turn=%.0f smooth=%.1f update=%dms tap=%d hold=%d retarget=%dms holdMs=%d combat=%d lock=%d lockKey=%d lockMode=%d yield=%d hostileList=%d return=%d vertical=%d switchMargin=%.0f tapKeys=%d holdKeys=%d lang=%d",
 				 found ? "ini: " : "NO ini found, defaults; looked for: ", g_iniPath[0] ? g_iniPath : PLUGIN_INI_NAME,
@@ -700,7 +721,8 @@ namespace
 	}
 
 	// Perfil escolhido no menu: true = TDM (movimento direcional do Coeus com armas na mao).
-	bool InCoeusProfile() { return g_cfg.profileMode == 1; }
+	volatile LONG g_drawnCache = 0;		// v0.27.0: arma/magia na mao (atualizado no ciclo principal)
+	bool InCoeusProfile() { return g_cfg.profileAuto ? (g_drawnCache != 0) : (g_cfg.profileMode == 1); }
 
 	// ------------------------------------------------------------------ funcoes nativas (menu)
 	const Opt * FindOpt(const char * key)
@@ -738,6 +760,7 @@ namespace
 		if(g_cfg.updateMs > 50)		g_cfg.updateMs = 50;
 		if(g_cfg.retargetMs < 16)	g_cfg.retargetMs = 16;
 
+		ApplyDerived();
 		_MESSAGE("menu: %s = %s", o->key, buf);
 		if(g_iniPath[0])
 		{
@@ -782,6 +805,7 @@ namespace
 			if(g_opts[i].type == 'i') *(int *)g_opts[i].ptr = (int)g_opts[i].def;
 			else					  *(float *)g_opts[i].ptr = g_opts[i].def;
 		}
+		ApplyDerived();
 		N_SaveAll(NULL);
 		_MESSAGE("menu: defaults restored");
 	}
@@ -826,6 +850,7 @@ namespace
 			if(g_opts[i].type == 'i') *(int *)g_opts[i].ptr = (int)(v + (v < 0 ? -0.5f : 0.5f));
 			else					  *(float *)g_opts[i].ptr = v;
 		}
+		ApplyDerived();
 		N_SaveAll(NULL);
 		_MESSAGE("menu: user profile loaded");
 		return 1;
@@ -3588,9 +3613,8 @@ namespace
 	}
 
 	// v0.23.0: a mascara Keytrace so e necessaria em combate: arma sacada e lock proprio/externo ligado
-	static bool KtCombatActive()
+	static bool CombatNow()
 	{
-		if(!g_cfg.keytraceCombatOnly) return true;
 		if(!(g_lockOwn || g_lockActive || g_active)) return false;		// v0.26.3: a sessao do SoftTarget tambem conta
 		bool drawn = false;
 		__try
@@ -3601,6 +3625,11 @@ namespace
 		__except(EXCEPTION_EXECUTE_HANDLER) { drawn = false; }
 		return drawn;
 	}
+	static bool KtCombatActive()
+	{
+		if(!g_cfg.keytraceCombatOnly) return true;
+		return CombatNow();
+	}
 
 	DWORD WINAPI DmkThread(LPVOID)
 	{
@@ -3610,10 +3639,11 @@ namespace
 		for(;;)
 		{
 			const bool ktOn = g_cfg.dmkKeytrace && g_cfg.enabled && g_gameLive && KtCombatActive();
-			Sleep((g_cfg.dmkCompat || ktOn) ? 8 : 50);
+			const bool dmkOn = g_cfg.dmkMode == 1 || (g_cfg.dmkMode == 2 && g_cfg.enabled && g_gameLive && CombatNow());		// v0.27.0: 2 = so em combate
+			Sleep((dmkOn || ktOn) ? 8 : 50);
 			const DWORD now = GetTickCount();
 			int dir = 0, cam = 0;
-			if(g_cfg.enabled && g_gameLive && ((g_cfg.dmkCompat && g_dmkReady && g_taskIface) || ktOn))
+			if(g_cfg.enabled && g_gameLive && ((dmkOn && g_dmkReady && g_taskIface) || ktOn))
 			{
 				DmkCompute(now, &dir, &cam, &camVal, &camTick);
 			}
@@ -3626,7 +3656,7 @@ namespace
 				else s_hDir = 0;
 			}
 			g_dmkDir = dir; g_dmkCam = cam;
-			if(!g_cfg.dmkCompat) { lastDir = dir; lastCam = cam; continue; }		// so a mascara Keytrace: nao se escreve no grafo
+			if(!dmkOn) { lastDir = dir; lastCam = cam; continue; }		// so a mascara Keytrace: nao se escreve no grafo
 			const bool changed = (dir != lastDir || cam != lastCam);
 			if(!changed && now - lastWrite < 500) continue;		// refresca de meio em meio segundo (o grafo reinicia ao mudar de area)
 			if(g_dmkPending && now - g_dmkQueuedAt < 500) continue;
@@ -4997,17 +5027,6 @@ namespace
 				else { g_railLat = lat; g_railHead = s_ch; g_railTick = now; g_railOn = 1; }
 			}
 			if(!s_rl) g_railOn = 0;
-			else if(g_railOn && g_moveHeld && !g_lockOwn && !g_active && g_railDir != 0.0f && (LONG)(g_alignUntil - now) <= 0)
-			{
-				// v0.26.6: o corpo acompanha a direcao de marcha ao longo da viga (sem andar de lado); a camera continua livre
-				NiPoint3 & rb = Engine::Rotation(player);
-				const float tgt = WrapPi(g_railHead + (g_railDir < 0.0f ? kPi : 0.0f));
-				float st = WrapPi(tgt - rb.z); st *= (1.0f - expf(-dt / 0.10f));
-				const float lm = 8.0f * dt; if(st > lm) st = lm; if(st < -lm) st = -lm;
-				rb.z = WrapPi(rb.z + st);
-				static int s_bl = 0; static DWORD s_blT = 0;
-				if(s_bl < 12 && (DWORD)(now - s_blT) >= 1000) { s_blT = now; ++s_bl; _MESSAGE("beam rail: body aligned to travel (target %.0f deg, error %.0f deg)", tgt * 57.2958f, WrapPi(tgt - rb.z) * 57.2958f); }
-			}
 		}
 		const bool ok = g_cfg.beamAssist && g_cfg.beamCamSteer && g_envOnBeam && g_beamOk && (DWORD)(now - g_beamTick) < 1000 && movingNow && !g_lockOwn && !g_active && !IsMountedCam();
 		if(!ok)
@@ -5110,11 +5129,16 @@ namespace
 			PlayerCharacter * player = Engine::Player();
 			if(!player) { phase = 0; continue; }
 
+			{
+				bool dr = false;
+				__try { dr = player->actorState.IsWeaponDrawn(); } __except(EXCEPTION_EXECUTE_HANDLER) { dr = false; }
+				g_drawnCache = dr ? 1 : 0;
+			}
 			const bool coeusProfile = InCoeusProfile();
 			if((int)coeusProfile != lastProfile)
 			{
 				lastProfile = (int)coeusProfile;
-				_MESSAGE("profile: %s", coeusProfile ? "FreeCam / Coeus (directional movement)" : "normal (no directional movement)");
+				_MESSAGE("profile: %s%s", coeusProfile ? "FreeCam / Coeus (directional movement)" : "normal (no directional movement)", g_cfg.profileAuto ? " [auto]" : "");
 			}
 
 			// Correr (Shift + andar) = fugir: a sessao acaba e o corpo volta a ser do jogador / do Coeus.
@@ -6037,7 +6061,7 @@ namespace
 				KtResolveMod();
 				EnvResolveMod();
 				KtInstall();
-				_MESSAGE("keytrace-mask: DmkKeytrace=%d", g_cfg.dmkKeytrace);
+				_MESSAGE("keytrace-mask: KeytraceMode=%d DmkMode=%d", g_cfg.ktMode, g_cfg.dmkMode);
 				if(g_cfg.dmkKeytrace) KtInstallHasMe();
 				break;
 
